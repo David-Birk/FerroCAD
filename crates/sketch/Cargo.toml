@@ -1,0 +1,10 @@
+[package]
+name = "ferrocad-sketch"
+description = "2D geometric constraint solver for ferrocad sketches"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Intentionally dependency-free: the solver is the heart of the sketcher and
+# should build and test anywhere.
+[dependencies]

@@ -1,0 +1,17 @@
+[package]
+name = "ferrocad"
+description = "Native parametric CAD for Linux – sketch, constrain, extrude, fillet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ferrocad-sketch.workspace = true
+ferrocad-model.workspace = true
+ferrocad-view.workspace = true
+ferrocad-kernel-occt.workspace = true
+eframe.workspace = true
+egui.workspace = true
+
+[features]
+builtin-occt = ["ferrocad-kernel-occt/builtin"]

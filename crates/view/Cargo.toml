@@ -1,0 +1,10 @@
+[package]
+name = "ferrocad-view"
+description = "Camera, projection, picking and software shading for the ferrocad viewport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# GUI-toolkit independent so it can be unit-tested headless.
+[dependencies]
+ferrocad-model.workspace = true

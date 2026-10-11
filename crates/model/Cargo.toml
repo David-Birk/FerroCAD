@@ -1,0 +1,11 @@
+[package]
+name = "ferrocad-model"
+description = "Parametric document model: parameters, feature timeline, kernel abstraction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Kernel-agnostic and dependency-free apart from the sketcher, so the whole
+# timeline logic is testable without OpenCascade.
+[dependencies]
+ferrocad-sketch.workspace = true

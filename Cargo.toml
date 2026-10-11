@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sketch",
+    "crates/model",
+    "crates/view",
+    "crates/kernel-occt",
+    "crates/app",
+]
+default-members = ["crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+ferrocad-sketch = { path = "crates/sketch" }
+ferrocad-model = { path = "crates/model" }
+ferrocad-view = { path = "crates/view" }
+ferrocad-kernel-occt = { path = "crates/kernel-occt" }
+
+# OCCT bindings. `builtin` is off: we link against the system OpenCascade
+# (Arch: `pacman -S opencascade`). Turn `builtin` on to compile OCCT from source.
+opencascade = { git = "https://github.com/bschwind/opencascade-rs", default-features = false }
+glam = "0.24"
+
+eframe = "0.36"
+egui = "0.36"
+
+[profile.dev.package."*"]
+# Dependencies (OCCT glue, wgpu) optimised even in debug builds – the viewport
+# is unusable otherwise.
+opt-level = 2

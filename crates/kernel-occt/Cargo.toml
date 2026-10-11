@@ -1,0 +1,16 @@
+[package]
+name = "ferrocad-kernel-occt"
+description = "OpenCascade implementation of the ferrocad Kernel trait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ferrocad-model.workspace = true
+opencascade.workspace = true
+glam.workspace = true
+
+[features]
+# Compile OCCT from source instead of linking the system library (slow:
+# 20–40 min, but needs nothing installed).
+builtin = ["opencascade/builtin"]
