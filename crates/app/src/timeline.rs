@@ -45,6 +45,7 @@ impl FerroApp {
                         let icon = match &f.kind {
                             FeatureKind::Sketch(_) => "✏",
                             FeatureKind::Extrude(_) => "⬆",
+                            FeatureKind::Revolve(_) => "⟳",
                             FeatureKind::Fillet(fl) if fl.chamfer => "◢",
                             FeatureKind::Fillet(_) => "◔",
                         };
@@ -103,6 +104,16 @@ impl FerroApp {
         });
 
         let Some(action) = action else { return };
+        let label = match &action {
+            Action::Edit(_) => None,
+            Action::ToggleSuppress(_) => Some("Suppress"),
+            Action::Delete(_) => Some("Delete feature"),
+            Action::Move(..) => Some("Reorder timeline"),
+            Action::Marker(_) => Some("Move timeline marker"),
+        };
+        if let Some(label) = label {
+            self.checkpoint(label);
+        }
         match action {
             Action::Edit(id) => self.edit_feature(id),
             Action::ToggleSuppress(id) => {

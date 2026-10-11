@@ -2,12 +2,12 @@
 //! toolbar on top, browser on the left, timeline at the bottom, viewport in
 //! the middle, tool dialogs as floating windows.
 
-use crate::dialogs::{ExtrudeSession, FilletSession};
+use crate::dialogs::{ExtrudeSession, FilletSession, RevolveSession};
 use crate::sketch_ui::SketchSession;
 use ferrocad_kernel_occt::OcctKernel;
 use ferrocad_model::geom::Vec3;
 use ferrocad_model::{
-    Document, FeatureId, FeatureKind, Kernel, Model, Plane, SketchFeature, TriMesh,
+    io, Document, FeatureId, FeatureKind, History, Kernel, Model, Plane, SketchFeature, TriMesh,
 };
 use ferrocad_view::{Camera, ViewPreset};
 
@@ -25,6 +25,7 @@ pub enum Mode {
     Model,
     Sketch(SketchSession),
     Extrude(ExtrudeSession),
+    Revolve(RevolveSession),
     Fillet(FilletSession),
 }
 
@@ -33,6 +34,7 @@ pub enum ModeKind {
     Model,
     Sketch,
     Extrude,
+    Revolve,
     Fillet,
 }
 
@@ -48,6 +50,12 @@ pub struct FerroApp {
     pub new_param: (String, String),
     pub param_edits: Vec<(String, String)>,
     pub export_path: String,
+    pub history: History,
+    /// Path of the open `.fcad` document (editable in the File menu).
+    pub doc_path: String,
+    /// While sketching: the document as of the last undo step, so sketch
+    /// edits can be recorded without cloning the document every frame.
+    pub sketch_baseline: Option<Document>,
 }
 
 impl FerroApp {
@@ -68,6 +76,9 @@ impl FerroApp {
             new_param: (String::new(), String::new()),
             param_edits: Vec::new(),
             export_path: "ferrocad-export.step".into(),
+            history: History::default(),
+            doc_path: format!("untitled.{}", io::EXTENSION),
+            sketch_baseline: None,
         };
         app.rebuild();
         app
@@ -78,6 +89,7 @@ impl FerroApp {
             Mode::Model => ModeKind::Model,
             Mode::Sketch(_) => ModeKind::Sketch,
             Mode::Extrude(_) => ModeKind::Extrude,
+            Mode::Revolve(_) => ModeKind::Revolve,
             Mode::Fillet(_) => ModeKind::Fillet,
         }
     }
@@ -121,6 +133,7 @@ impl FerroApp {
     }
 
     pub fn start_sketch(&mut self, plane: Plane, label: &str) {
+        self.checkpoint("New sketch");
         let name = self.doc.next_name("Sketch");
         let id = self.doc.add(name.clone(), FeatureKind::Sketch(SketchFeature::new(plane)));
         self.camera.look_at_plane(plane.normal());
@@ -136,13 +149,161 @@ impl FerroApp {
                 self.mode = Mode::Sketch(SketchSession::new(id));
             }
             FeatureKind::Extrude(e) => self.mode = Mode::Extrude(ExtrudeSession::edit(id, e)),
+            FeatureKind::Revolve(r) => self.mode = Mode::Revolve(RevolveSession::edit(id, r)),
             FeatureKind::Fillet(fl) => self.mode = Mode::Fillet(FilletSession::edit(id, fl)),
+        }
+    }
+
+    /// Record an undo step before mutating the document.
+    pub fn checkpoint(&mut self, label: &str) {
+        self.history.checkpoint(label, &self.doc);
+        self.sketch_baseline = None;
+    }
+
+    /// Record an undo step from a snapshot taken earlier.
+    pub fn record(&mut self, label: &str, before: Document) {
+        self.history.record(label, before);
+        self.sketch_baseline = None;
+    }
+
+    /// Record a sketch edit that already happened (see `sketch_baseline`).
+    pub fn commit_sketch_edit(&mut self, label: &str) {
+        if let Some(before) = self.sketch_baseline.take() {
+            self.history.record(label, before);
+        }
+    }
+
+    pub fn undo(&mut self) {
+        match self.history.undo(&mut self.doc) {
+            Some(label) => {
+                self.after_history_change();
+                self.info(format!("Undo: {label}"));
+            }
+            None => self.info("nothing to undo"),
+        }
+    }
+
+    pub fn redo(&mut self) {
+        match self.history.redo(&mut self.doc) {
+            Some(label) => {
+                self.after_history_change();
+                self.info(format!("Redo: {label}"));
+            }
+            None => self.info("nothing to redo"),
+        }
+    }
+
+    /// The document was swapped out under the UI: drop stale tool state.
+    fn after_history_change(&mut self) {
+        self.sketch_baseline = None;
+        let keep_sketch = match &mut self.mode {
+            Mode::Sketch(sess) if self.doc.sketch(sess.feature).is_some() => {
+                sess.analysis = None;
+                sess.selection.clear();
+                sess.clicks.clear();
+                sess.dim_edits.clear();
+                sess.dragging = None;
+                true
+            }
+            _ => false,
+        };
+        if !keep_sketch {
+            self.mode = Mode::Model;
+        }
+        self.param_edits.clear();
+        self.rebuild();
+    }
+
+    fn new_document(&mut self) {
+        self.checkpoint("New document");
+        self.doc = Document::new();
+        self.mode = Mode::Model;
+        self.param_edits.clear();
+        self.doc_path = format!("untitled.{}", io::EXTENSION);
+        self.rebuild();
+        self.info("new document (Undo brings the old one back)");
+    }
+
+    fn save_document(&mut self) {
+        let mut path = std::path::PathBuf::from(self.doc_path.trim());
+        if path.extension().is_none() {
+            path.set_extension(io::EXTENSION);
+        }
+        match std::fs::write(&path, io::save(&self.doc)) {
+            Ok(()) => {
+                self.doc_path = path.display().to_string();
+                self.info(format!("saved {}", path.display()));
+            }
+            Err(e) => self.error(format!("could not save {}: {e}", path.display())),
+        }
+    }
+
+    fn open_document(&mut self) {
+        let path = std::path::PathBuf::from(self.doc_path.trim());
+        let loaded = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| io::load(&text).map_err(|e| e.to_string()));
+        match loaded {
+            Ok(doc) => {
+                self.checkpoint("Open document");
+                self.doc = doc;
+                self.mode = Mode::Model;
+                self.param_edits.clear();
+                self.message = None;
+                self.rebuild();
+                self.fit_view();
+                if self.message.is_none() {
+                    self.info(format!("opened {}", path.display()));
+                }
+            }
+            Err(e) => self.error(format!("could not open {}: {e}", path.display())),
+        }
+    }
+
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (undo, redo, save) = ctx.input(|i| {
+            let cmd = i.modifiers.command;
+            let z = cmd && i.key_pressed(egui::Key::Z);
+            (
+                z && !i.modifiers.shift,
+                (z && i.modifiers.shift) || (cmd && i.key_pressed(egui::Key::Y)),
+                cmd && i.key_pressed(egui::Key::S),
+            )
+        });
+        if undo {
+            self.undo();
+        }
+        if redo {
+            self.redo();
+        }
+        if save {
+            self.save_document();
         }
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.menu_button("File", |ui| {
+                ui.label("Document");
+                ui.text_edit_singleline(&mut self.doc_path);
+                ui.horizontal(|ui| {
+                    if ui.button("New").clicked() {
+                        self.new_document();
+                        ui.close();
+                    }
+                    if ui.button("Open").clicked() {
+                        self.open_document();
+                        ui.close();
+                    }
+                    if ui.button("Save (Ctrl+S)").clicked() {
+                        self.save_document();
+                        ui.close();
+                    }
+                });
+                ui.separator();
                 ui.label("Export path");
                 ui.text_edit_singleline(&mut self.export_path);
                 if ui.button("Export STEP (all bodies)").clicked() {
@@ -154,6 +315,22 @@ impl FerroApp {
                     ui.close();
                 }
             });
+            let undo_tip = self.history.undo_label().map(|l| format!("Undo {l} (Ctrl+Z)"));
+            if ui
+                .add_enabled(undo_tip.is_some(), egui::Button::new("↶"))
+                .on_hover_text(undo_tip.unwrap_or_default())
+                .clicked()
+            {
+                self.undo();
+            }
+            let redo_tip = self.history.redo_label().map(|l| format!("Redo {l} (Ctrl+Shift+Z)"));
+            if ui
+                .add_enabled(redo_tip.is_some(), egui::Button::new("↷"))
+                .on_hover_text(redo_tip.unwrap_or_default())
+                .clicked()
+            {
+                self.redo();
+            }
             ui.separator();
 
             let in_sketch = matches!(self.mode, Mode::Sketch(_));
@@ -170,6 +347,9 @@ impl FerroApp {
                 });
                 if ui.button("⬆ Extrude").clicked() {
                     self.mode = Mode::Extrude(ExtrudeSession::new(&self.doc));
+                }
+                if ui.button("⟳ Revolve").clicked() {
+                    self.mode = Mode::Revolve(RevolveSession::new(&self.doc));
                 }
                 if ui.button("◔ Fillet").clicked() {
                     self.mode = Mode::Fillet(FilletSession::new(false));
@@ -267,6 +447,10 @@ impl FerroApp {
 impl eframe::App for FerroApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.shortcuts(&ctx);
+        if matches!(self.mode, Mode::Sketch(_)) && self.sketch_baseline.is_none() {
+            self.sketch_baseline = Some(self.doc.clone());
+        }
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
 
@@ -299,6 +483,7 @@ impl eframe::App for FerroApp {
         match self.mode_kind() {
             ModeKind::Sketch => self.sketch_palette(&ctx),
             ModeKind::Extrude => self.extrude_window(&ctx),
+            ModeKind::Revolve => self.revolve_window(&ctx),
             ModeKind::Fillet => self.fillet_window(&ctx),
             ModeKind::Model => {}
         }

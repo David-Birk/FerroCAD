@@ -9,6 +9,7 @@ use ferrocad_model::geom::{distance, scale, Vec3};
 use ferrocad_model::kernel::polyline_midpoint;
 use ferrocad_model::{BooleanOp, EdgeRef, Kernel, KernelError, Loop3, PlacedProfile, Seg3, TriMesh};
 use glam::{dvec3, DVec3};
+use opencascade::angle::Angle;
 use opencascade::primitives::{Edge, Face, Shape, Wire};
 use std::path::Path;
 use std::rc::Rc;
@@ -69,6 +70,20 @@ impl Kernel for OcctKernel {
         }
         let face = Face::from_wire_with_holes(&outer, &holes);
         let solid = face.extrude(v(scale(profile.normal, dist)));
+        Ok(Rc::new(Shape::from(solid)))
+    }
+
+    fn revolve(
+        &self,
+        profile: &PlacedProfile,
+        axis_origin: Vec3,
+        axis_dir: Vec3,
+        angle: f64,
+    ) -> Result<Self::Solid, KernelError> {
+        let outer = wire(&profile.outer)?;
+        let holes = profile.holes.iter().map(wire).collect::<Result<Vec<_>, _>>()?;
+        let face = Face::from_wire_with_holes(&outer, &holes);
+        let solid = face.revolve(v(axis_origin), v(axis_dir), Some(Angle::Radians(angle)));
         Ok(Rc::new(Shape::from(solid)))
     }
 

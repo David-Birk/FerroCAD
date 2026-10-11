@@ -19,7 +19,7 @@ pub struct Point {
     pub y: ParamId,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Entity {
     Line { a: PointId, b: PointId },
     Circle { center: PointId, radius: ParamId },

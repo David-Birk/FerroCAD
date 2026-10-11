@@ -70,6 +70,7 @@ impl FerroApp {
             ModeKind::Model => {}
             ModeKind::Sketch => self.sketch_viewport(ui, &response, &painter, &vp),
             ModeKind::Extrude => self.extrude_viewport(&response, &painter, &vp),
+            ModeKind::Revolve => self.revolve_viewport(&response, &painter, &vp),
             ModeKind::Fillet => self.fillet_viewport(&response, &painter, &vp),
         }
 

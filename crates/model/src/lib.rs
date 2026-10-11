@@ -8,13 +8,18 @@ pub mod document;
 pub mod expr;
 pub mod feature;
 pub mod geom;
+pub mod history;
+pub mod io;
+pub mod json;
 pub mod kernel;
 pub mod params;
 
 pub use document::{Body, Document, FeatureStatus, Model};
 pub use feature::{
-    ExtrudeFeature, Feature, FeatureId, FeatureKind, FilletFeature, Operation, SketchFeature,
+    ExtrudeFeature, Feature, FeatureId, FeatureKind, FilletFeature, Operation, RevolveAxis,
+    RevolveFeature, SketchFeature,
 };
 pub use geom::{Plane, Vec3};
+pub use history::History;
 pub use kernel::{BooleanOp, EdgeRef, Kernel, KernelError, Loop3, PlacedProfile, Seg3, TriMesh};
 pub use params::{ParamTable, Parameter};

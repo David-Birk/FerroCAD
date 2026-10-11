@@ -17,7 +17,7 @@ crates/
 
 | Crate | Status |
 |---|---|
-| `sketch`, `model`, `view` | getestet (`cargo test -p ferrocad-sketch -p ferrocad-model -p ferrocad-view`, 35 Tests) |
+| `sketch`, `model`, `view` | getestet (`cargo test -p ferrocad-sketch -p ferrocad-model -p ferrocad-view`, 63 Tests) |
 | `kernel-occt`, `app` | geschrieben gegen die Quellen von opencascade-rs (main) und egui 0.36.2, **noch nie kompiliert** – erster Build auf deinem Rechner |
 
 ## Bauen (Arch Linux)
@@ -43,25 +43,33 @@ cargo run --release --features builtin-occt
   - Bemaßungen akzeptieren Zahlen oder Ausdrücke wie `width / 2`; blau = noch frei, weiß = voll bestimmt
   - Punkte mit dem Auswahlwerkzeug ziehen
 - **⬆ Extrude** → Skizze wählen, in eine Region klicken → Abstand (Ausdruck), Operation (Neuer Körper/Vereinigen/Schneiden/Schnitt)
+  - Regionen entstehen auch durch sich kreuzende Kurven: eine Linie quer durchs Rechteck ergibt zwei Flächen, zwei überlappende Kreise drei
+- **⟳ Revolve** → Region wählen, Achse (Skizzen-X/Y oder eine Linie der Skizze, z. B. Konstruktionslinie), Winkel in Grad
 - **◔ Fillet / ◢ Chamfer** → Kanten anklicken → Radius
 - **ƒ Parameters** → Parameter ändern, alles baut sich neu auf
 - **Zeitleiste:** Doppelklick = bearbeiten, Rechtsklick = unterdrücken / zurückrollen / verschieben / löschen
-- **File** → STEP (alle sichtbaren Körper) oder STL exportieren
+- **File** → Dokumentpfad, Neu / Öffnen / Speichern (`.fcad`, Ctrl+S), STEP- (alle sichtbaren Körper) oder STL-Export
+- **↶ ↷ Undo/Redo** (Ctrl+Z, Ctrl+Shift+Z oder Ctrl+Y) – auch für einzelne Skizzenschritte
+
+## Dateiformat `.fcad`
+
+Lesbares JSON: Parameter, Skizzen (Punkte, Kurven, Bedingungen, parametrische Bemaßungen) und die
+Feature-Zeitleiste. Körper werden beim Laden neu berechnet, wie bei Fusion. Dateien lassen sich gut mit
+git versionieren; beschädigte Dateien liefern eine Fehlermeldung statt eines Absturzes.
 
 ## Bekannte Grenzen und nächste Schritte
 
-1. **Speichern/Laden** fehlt – nächster Schritt: `serde` + RON-Dateiformat.
-2. **Fillet-Absturz:** opencascade-rs prüft `IsDone()` nicht; ein zu großer Radius wirft eine C++-Exception
+1. **Fillet-Absturz:** opencascade-rs prüft `IsDone()` nicht; ein zu großer Radius wirft eine C++-Exception
    und beendet das Programm. Lösung: kleiner Upstream-PR (oder Fork), der `Result` zurückgibt.
-3. **Topologisches Benennungsproblem:** Kanten für Fillets werden über ihren Mittelpunkt wiedergefunden
+2. **Topologisches Benennungsproblem:** Kanten für Fillets werden über ihren Mittelpunkt wiedergefunden
    (Toleranz 1 mm). Große Parameteränderungen verlieren die Auswahl → Fehler in der Zeitleiste, Kanten neu wählen.
-4. **Regionen:** Verzweigte Linien (eine Linie quer durch ein Rechteck) werden noch nicht in Teilflächen zerlegt;
-   geschlossene Schleifen und Löcher funktionieren.
-5. **Rendering:** Painter-Algorithmus über egui (keine echte Tiefenpufferung). Gut für einfache Teile; nächster
+3. **Regionen:** Kreuzungen werden aufgelöst; überlappende *kollineare* Linien (zwei Linien übereinander, aber
+   unterschiedlich lang) werden noch nicht zusammengeführt.
+4. **Rendering:** Painter-Algorithmus über egui (keine echte Tiefenpufferung). Gut für einfache Teile; nächster
    Schritt ist ein `egui_wgpu`-Paint-Callback mit Depth-Buffer.
-6. Skizzen nur auf den Ursprungsebenen – Skizzieren auf Körperflächen, Revolve, Muster, Spiegeln, Undo/Redo
-   und Baugruppen fehlen noch.
-7. Der Solver nutzt eine numerische Jacobimatrix und dichte lineare Algebra – reicht für Hunderte Unbekannte;
+5. Skizzen nur auf den Ursprungsebenen – Skizzieren auf Körperflächen, Muster, Spiegeln und Baugruppen fehlen noch.
+   Revolve-Profile dürfen die Achse nicht schneiden (sonst meldet OCCT einen ungültigen Körper).
+6. Der Solver nutzt eine numerische Jacobimatrix und dichte lineare Algebra – reicht für Hunderte Unbekannte;
    für große Skizzen später analytische Ableitungen und eine Sparse-Zerlegung.
 
 Lizenz: GPL-3.0-or-later (opencascade-rs/OCCT sind LGPL-2.1).

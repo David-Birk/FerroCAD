@@ -403,6 +403,9 @@ impl FerroApp {
             }
         }
 
+        if changed {
+            self.commit_sketch_edit("Sketch edit");
+        }
         if let Some(e) = error {
             self.error(e);
         }
@@ -433,6 +436,8 @@ impl FerroApp {
         let name = self.doc.feature(sess.feature).map(|f| f.name.clone()).unwrap_or_default();
         let Some(sf) = self.doc.sketch_mut(sess.feature) else { return true };
         let mut message: Option<(String, bool)> = None;
+        // Cheap per-frame copy of just this sketch to detect edits for undo.
+        let snapshot = (sf.sketch.to_data(), sf.driven.clone());
 
         ui.horizontal(|ui| {
             ui.strong(name);
@@ -655,9 +660,14 @@ impl FerroApp {
         ui.separator();
         let finish = ui.button("✔ Finish sketch").clicked();
         ui.weak("Esc: cancel / select tool · Del: delete selection · drag points with Select");
+        ui.weak("Ctrl+Z / Ctrl+Shift+Z: undo / redo");
 
+        let edited = (sf.sketch.to_data(), sf.driven.clone()) != snapshot;
         if let Some(m) = message {
             self.message = Some(m);
+        }
+        if edited {
+            self.commit_sketch_edit("Sketch edit");
         }
         finish
     }

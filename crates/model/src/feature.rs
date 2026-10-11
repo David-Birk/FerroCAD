@@ -2,7 +2,7 @@
 
 use crate::geom::Plane;
 use crate::kernel::EdgeRef;
-use ferrocad_sketch::{ConstraintId, Sketch};
+use ferrocad_sketch::{ConstraintId, EntityId, Sketch};
 
 /// Stable id: survives reordering and deleting other features.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -72,6 +72,27 @@ pub struct ExtrudeFeature {
     pub operation: Operation,
 }
 
+/// Axis of a revolve, in terms of the profile's sketch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevolveAxis {
+    /// The sketch's horizontal axis through its origin.
+    SketchX,
+    /// The sketch's vertical axis through its origin.
+    SketchY,
+    /// A line of the sketch (usually a construction line).
+    Line(EntityId),
+}
+
+#[derive(Clone, Debug)]
+pub struct RevolveFeature {
+    pub sketch: FeatureId,
+    pub profile_point: [f64; 2],
+    pub axis: RevolveAxis,
+    /// Expression in degrees, e.g. `"360"` or `"angle / 2"`.
+    pub angle: String,
+    pub operation: Operation,
+}
+
 #[derive(Clone, Debug)]
 pub struct FilletFeature {
     pub edges: Vec<EdgeRef>,
@@ -84,6 +105,7 @@ pub struct FilletFeature {
 pub enum FeatureKind {
     Sketch(SketchFeature),
     Extrude(ExtrudeFeature),
+    Revolve(RevolveFeature),
     Fillet(FilletFeature),
 }
 
@@ -92,8 +114,18 @@ impl FeatureKind {
         match self {
             FeatureKind::Sketch(_) => "Sketch",
             FeatureKind::Extrude(_) => "Extrude",
+            FeatureKind::Revolve(_) => "Revolve",
             FeatureKind::Fillet(f) if f.chamfer => "Chamfer",
             FeatureKind::Fillet(_) => "Fillet",
+        }
+    }
+
+    /// The sketch this feature consumes, if any.
+    pub fn sketch_ref(&self) -> Option<FeatureId> {
+        match self {
+            FeatureKind::Extrude(e) => Some(e.sketch),
+            FeatureKind::Revolve(r) => Some(r.sketch),
+            _ => None,
         }
     }
 }

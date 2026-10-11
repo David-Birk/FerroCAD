@@ -54,12 +54,17 @@ impl Plane {
     pub const XZ: Plane = Plane { origin: [0.0; 3], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 0.0, 1.0] };
     pub const YZ: Plane = Plane { origin: [0.0; 3], x_axis: [0.0, 1.0, 0.0], y_axis: [0.0, 0.0, 1.0] };
 
-    /// Plane through `origin` with the given normal; picks a stable in-plane
-    /// x axis.
+    /// Plane through `origin` with the given normal and a predictable
+    /// in-plane x axis: +X for horizontal planes, otherwise horizontal with
+    /// "up" (+Z) as the sketch's y direction – matching XY, XZ and YZ.
     pub fn from_normal(origin: Vec3, normal: Vec3) -> Plane {
         let n = normalize(normal);
-        let helper = if n[2].abs() < 0.9 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
-        let x_axis = normalize(cross(helper, n));
+        let x_axis = if n[2].abs() > 0.9 {
+            // project +X into the plane
+            normalize(sub([1.0, 0.0, 0.0], scale(n, n[0])))
+        } else {
+            normalize(cross([0.0, 0.0, 1.0], n))
+        };
         let y_axis = cross(n, x_axis);
         Plane { origin, x_axis, y_axis }
     }
@@ -87,5 +92,36 @@ impl Plane {
         }
         let t = dot(n, sub(self.origin, origin)) / denom;
         Some(add(origin, scale(dir, t)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: Vec3, b: Vec3) -> bool {
+        distance(a, b) < 1e-12
+    }
+
+    #[test]
+    fn from_normal_matches_origin_planes() {
+        for p in [Plane::XY, Plane::XZ, Plane::YZ] {
+            let q = Plane::from_normal(p.origin, p.normal());
+            assert!(close(q.x_axis, p.x_axis) && close(q.y_axis, p.y_axis), "{p:?} vs {q:?}");
+        }
+        // bottom face: still right-handed with the normal pointing down
+        let b = Plane::from_normal([0.0; 3], [0.0, 0.0, -1.0]);
+        assert!(close(b.normal(), [0.0, 0.0, -1.0]));
+        assert!(close(b.x_axis, [1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn local_world_roundtrip_and_ray() {
+        let p = Plane::from_normal([1.0, 2.0, 3.0], [1.0, 1.0, 0.5]);
+        let w = p.to_world([4.0, -2.0]);
+        let uv = p.to_local(w);
+        assert!((uv[0] - 4.0).abs() < 1e-12 && (uv[1] + 2.0).abs() < 1e-12);
+        let hit = p.intersect_ray(add(w, scale(p.normal(), 10.0)), scale(p.normal(), -1.0)).unwrap();
+        assert!(close(hit, w));
     }
 }

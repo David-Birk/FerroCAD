@@ -5,8 +5,8 @@
 //! created so far. A failing feature is marked as an error and skipped; the
 //! features after it still run, like Fusion's red timeline icons.
 
-use crate::feature::{Feature, FeatureId, FeatureKind, Operation, SketchFeature};
-use crate::geom::distance;
+use crate::feature::{Feature, FeatureId, FeatureKind, Operation, RevolveAxis, SketchFeature};
+use crate::geom::{distance, normalize, sub};
 use crate::kernel::{polyline_midpoint, BooleanOp, EdgeRef, Kernel, PlacedProfile};
 use crate::params::ParamTable;
 use ferrocad_sketch::profile::profile_at;
@@ -55,10 +55,10 @@ impl<S> Model<S> {
 #[derive(Clone, Debug, Default)]
 pub struct Document {
     pub params: ParamTable,
-    features: Vec<Feature>,
+    pub(crate) features: Vec<Feature>,
     /// Number of features that are evaluated (the timeline marker).
-    marker: usize,
-    next_id: u64,
+    pub(crate) marker: usize,
+    pub(crate) next_id: u64,
 }
 
 impl Document {
@@ -118,7 +118,7 @@ impl Document {
         let users: Vec<&str> = self
             .features
             .iter()
-            .filter(|f| matches!(&f.kind, FeatureKind::Extrude(e) if e.sketch == id))
+            .filter(|f| f.kind.sketch_ref() == Some(id))
             .map(|f| f.name.as_str())
             .collect();
         if !users.is_empty() {
@@ -139,14 +139,14 @@ impl Document {
         let to = to.min(self.features.len() - 1);
         let f = self.features.remove(from);
         self.features.insert(to, f);
-        let ok = self.features.iter().enumerate().all(|(i, f)| match &f.kind {
-            FeatureKind::Extrude(e) => self.index_of(e.sketch).is_some_and(|s| s < i),
-            _ => true,
+        let ok = self.features.iter().enumerate().all(|(i, f)| match f.kind.sketch_ref() {
+            Some(sketch) => self.index_of(sketch).is_some_and(|s| s < i),
+            None => true,
         });
         if !ok {
             let f = self.features.remove(to);
             self.features.insert(from, f);
-            return Err("an extrude must come after its sketch".into());
+            return Err("a feature must come after the sketch it uses".into());
         }
         Ok(())
     }
@@ -209,22 +209,40 @@ impl Document {
                 if distance.abs() < 1e-9 {
                     return Err("distance is zero".into());
                 }
-                let si = self.index_of(e.sketch).ok_or("sketch was deleted")?;
-                if si >= i {
-                    return Err("sketch comes after this extrude".into());
-                }
-                if self.features[si].suppressed {
-                    return Err("sketch is suppressed".into());
-                }
-                let FeatureKind::Sketch(s) = &self.features[si].kind else {
-                    return Err("referenced feature is not a sketch".into());
-                };
-                let profiles = find_profiles(&s.sketch);
-                let pi = profile_at(&profiles, e.profile_point)
-                    .ok_or("profile no longer exists – edit the extrude to pick it again")?;
-                let placed = PlacedProfile::new(&profiles[pi], &s.plane);
+                let (_, placed) = self.placed_profile(i, e.sketch, e.profile_point)?;
                 let tool = k.extrude(&placed, distance, e.symmetric).map_err(|e| e.0)?;
                 apply_operation(k, model, e.operation, tool, id, body_counter)
+            }
+
+            FeatureKind::Revolve(r) => {
+                let r = r.clone();
+                let degrees = params.eval(&r.angle).map_err(|e| e.to_string())?;
+                if degrees.abs() < 1e-9 || degrees.abs() > 360.0 + 1e-9 {
+                    return Err("angle must be between 0 and 360°".into());
+                }
+                let (s, placed) = self.placed_profile(i, r.sketch, r.profile_point)?;
+                let (origin, dir) = match r.axis {
+                    RevolveAxis::SketchX => (s.plane.origin, s.plane.x_axis),
+                    RevolveAxis::SketchY => (s.plane.origin, s.plane.y_axis),
+                    RevolveAxis::Line(l) => {
+                        let ferrocad_sketch::Entity::Line { a, b } = *s.sketch.entity(l) else {
+                            return Err("axis is not a line".into());
+                        };
+                        if !s.sketch.is_alive(l) {
+                            return Err("axis line was deleted".into());
+                        }
+                        let a = s.plane.to_world(s.sketch.point_pos(a));
+                        let b = s.plane.to_world(s.sketch.point_pos(b));
+                        (a, sub(b, a))
+                    }
+                };
+                if distance(dir, [0.0; 3]) < 1e-9 {
+                    return Err("axis has zero length".into());
+                }
+                let tool = k
+                    .revolve(&placed, origin, normalize(dir), degrees.to_radians())
+                    .map_err(|e| e.0)?;
+                apply_operation(k, model, r.operation, tool, id, body_counter)
             }
 
             FeatureKind::Fillet(f) => {
@@ -272,6 +290,32 @@ impl Document {
                 Ok(())
             }
         }
+    }
+}
+
+impl Document {
+    /// The sketch feature at `sketch` (which must come before timeline
+    /// position `user`) and its profile containing `point`, placed in 3D.
+    fn placed_profile(
+        &self,
+        user: usize,
+        sketch: FeatureId,
+        point: [f64; 2],
+    ) -> Result<(&SketchFeature, PlacedProfile), String> {
+        let si = self.index_of(sketch).ok_or("sketch was deleted")?;
+        if si >= user {
+            return Err("the sketch comes after this feature".into());
+        }
+        if self.features[si].suppressed {
+            return Err("sketch is suppressed".into());
+        }
+        let FeatureKind::Sketch(s) = &self.features[si].kind else {
+            return Err("referenced feature is not a sketch".into());
+        };
+        let profiles = find_profiles(&s.sketch);
+        let pi = profile_at(&profiles, point)
+            .ok_or("profile no longer exists – edit the feature to pick it again")?;
+        Ok((s, PlacedProfile::new(&profiles[pi], &s.plane)))
     }
 }
 

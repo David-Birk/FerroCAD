@@ -1,94 +1,10 @@
 //! Timeline behaviour against a mock kernel that records what it was asked
 //! to do instead of building real geometry.
 
-use ferrocad_model::geom::Vec3;
+mod common;
+
+use common::{plate_document, Mock};
 use ferrocad_model::*;
-use ferrocad_sketch::{Constraint, Entity};
-use std::path::Path;
-use std::rc::Rc;
-
-#[derive(Debug)]
-struct MockSolid {
-    desc: String,
-    edges: Vec<Vec<Vec3>>,
-}
-
-struct Mock;
-
-impl Kernel for Mock {
-    type Solid = Rc<MockSolid>;
-
-    fn extrude(&self, p: &PlacedProfile, d: f64, sym: bool) -> Result<Self::Solid, KernelError> {
-        let mut area = 0.0;
-        let mut edges = Vec::new();
-        for s in &p.outer.segments {
-            if let Seg3::Line { a, b } = s {
-                area += 0.5 * (a[0] * b[1] - b[0] * a[1]);
-                edges.push(vec![*a, *b]);
-            }
-        }
-        let desc = format!("extrude(area={area:.1}, d={d}, holes={}, sym={sym})", p.holes.len());
-        Ok(Rc::new(MockSolid { desc, edges }))
-    }
-
-    fn boolean(&self, op: BooleanOp, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, KernelError> {
-        let desc = format!("{op:?}({}, {})", a.desc, b.desc);
-        Ok(Rc::new(MockSolid { desc, edges: a.edges.clone() }))
-    }
-
-    fn fillet(&self, s: &Self::Solid, e: &[EdgeRef], r: f64, chamfer: bool) -> Result<Self::Solid, KernelError> {
-        let desc = format!("fillet({}, n={}, r={r}, chamfer={chamfer})", s.desc, e.len());
-        Ok(Rc::new(MockSolid { desc, edges: s.edges.clone() }))
-    }
-
-    fn tessellate(&self, _: &Self::Solid, _: f64) -> Result<TriMesh, KernelError> {
-        Ok(TriMesh::default())
-    }
-
-    fn edges(&self, s: &Self::Solid) -> Vec<Vec<Vec3>> {
-        s.edges.clone()
-    }
-
-    fn export_step(&self, _: &[Self::Solid], _: &Path) -> Result<(), KernelError> {
-        Ok(())
-    }
-
-    fn export_stl(&self, _: &Self::Solid, _: &Path) -> Result<(), KernelError> {
-        Ok(())
-    }
-}
-
-/// Parametric plate: `width` × `width/2`, extruded by `thickness`.
-fn plate_document() -> (Document, FeatureId, FeatureId) {
-    let mut doc = Document::new();
-    doc.params.set("width", "40 mm").unwrap();
-    doc.params.set("thickness", "5").unwrap();
-
-    let mut sf = SketchFeature::new(Plane::XY);
-    let [bottom, right, ..] = sf.sketch.add_rectangle([0.0, 0.0], [30.0, 10.0]);
-    let origin = match *sf.sketch.entity(bottom) {
-        Entity::Line { a, .. } => a,
-        _ => unreachable!(),
-    };
-    sf.sketch.set_point_fixed(origin, true);
-    let w = sf.sketch.constrain(Constraint::Length(bottom, 30.0));
-    let h = sf.sketch.constrain(Constraint::Length(right, 10.0));
-    sf.set_expression(w, "width");
-    sf.set_expression(h, "width / 2");
-    let sketch = doc.add("Sketch1", FeatureKind::Sketch(sf));
-
-    let extrude = doc.add(
-        "Extrude1",
-        FeatureKind::Extrude(ExtrudeFeature {
-            sketch,
-            profile_point: [1.0, 1.0],
-            distance: "thickness".into(),
-            symmetric: false,
-            operation: Operation::NewBody,
-        }),
-    );
-    (doc, sketch, extrude)
-}
 
 #[test]
 fn parameters_drive_the_model() {
@@ -233,4 +149,39 @@ fn profile_point_selects_hole_region() {
     let model = doc.rebuild(&Mock);
     assert_eq!(*model.status(plate), FeatureStatus::Ok);
     assert!(model.bodies[0].solid.desc.contains("holes=1"));
+}
+
+#[test]
+fn revolve_about_sketch_axis_and_line() {
+    let mut doc = Document::new();
+    doc.params.set("angle", "180").unwrap();
+    // Profile on the XZ plane, axis = sketch Y (world Z) or a construction line.
+    let mut sf = SketchFeature::new(Plane::XZ);
+    sf.sketch.add_rectangle([5.0, 0.0], [10.0, 20.0]);
+    let axis = sf.sketch.add_line([0.0, 0.0], [0.0, 10.0]);
+    sf.sketch.set_construction(axis, true);
+    let sketch = doc.add("Sketch1", FeatureKind::Sketch(sf));
+
+    let rev = |axis| {
+        FeatureKind::Revolve(RevolveFeature {
+            sketch,
+            profile_point: [7.0, 5.0],
+            axis,
+            angle: "angle * 2".into(),
+            operation: Operation::NewBody,
+        })
+    };
+    let a = doc.add("Revolve1", rev(RevolveAxis::SketchY));
+    let b = doc.add("Revolve2", rev(RevolveAxis::Line(axis)));
+    let model = doc.rebuild(&Mock);
+    assert_eq!(*model.status(a), FeatureStatus::Ok);
+    assert_eq!(*model.status(b), FeatureStatus::Ok);
+    assert_eq!(model.bodies[0].solid.desc, "revolve(segs=4, o=[0.0, 0.0, 0.0], d=[0.0, 0.0, 1.0], deg=360.0)");
+    assert_eq!(model.bodies[1].solid.desc, model.bodies[0].solid.desc);
+
+    doc.params.set("angle", "200").unwrap();
+    assert!(matches!(doc.rebuild(&Mock).status(a), FeatureStatus::Error(e) if e.contains("360")));
+
+    // The sketch cannot be deleted while a revolve uses it.
+    assert!(doc.remove(sketch).is_err());
 }

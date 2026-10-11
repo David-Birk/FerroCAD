@@ -129,6 +129,16 @@ pub trait Kernel {
         symmetric: bool,
     ) -> Result<Self::Solid, KernelError>;
 
+    /// Revolve around the axis through `axis_origin` along `axis_dir`
+    /// (right-hand rule) by `angle` radians.
+    fn revolve(
+        &self,
+        profile: &PlacedProfile,
+        axis_origin: Vec3,
+        axis_dir: Vec3,
+        angle: f64,
+    ) -> Result<Self::Solid, KernelError>;
+
     fn boolean(
         &self,
         op: BooleanOp,

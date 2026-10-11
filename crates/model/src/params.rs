@@ -30,10 +30,7 @@ impl ParamTable {
     /// Create or update a parameter. Names must be identifiers and must not
     /// shadow a unit (`mm`, `in` …).
     pub fn set(&mut self, name: &str, expression: &str) -> Result<(), ExprError> {
-        let valid = name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
-            && !["mm", "cm", "m", "in", "deg", "rad", "pi"].contains(&name);
-        if !valid {
+        if !valid_name(name) {
             return Err(ExprError::Syntax(format!("invalid parameter name '{name}'")));
         }
         let old = self.get(name).cloned();
@@ -53,6 +50,27 @@ impl ParamTable {
             }
             return Err(e);
         }
+        Ok(())
+    }
+
+    /// Replace the whole table without evaluating anything (used when
+    /// loading files, where parameters may reference later ones). Names are
+    /// still checked; call [`ParamTable::value`] afterwards to validate.
+    pub fn set_unchecked(&mut self, params: Vec<(String, String, String)>) -> Result<(), String> {
+        let mut seen: Vec<&str> = Vec::new();
+        for (name, _, _) in &params {
+            if !valid_name(name) {
+                return Err(format!("invalid parameter name '{name}'"));
+            }
+            if seen.contains(&name.as_str()) {
+                return Err(format!("parameter '{name}' defined twice"));
+            }
+            seen.push(name);
+        }
+        self.params = params
+            .into_iter()
+            .map(|(name, expression, comment)| Parameter { name, expression, comment })
+            .collect();
         Ok(())
     }
 
@@ -103,6 +121,12 @@ impl ParamTable {
         stack.pop();
         result
     }
+}
+
+fn valid_name(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !["mm", "cm", "m", "in", "deg", "rad", "pi"].contains(&name)
 }
 
 #[cfg(test)]

@@ -1,18 +1,8 @@
-//! Closed-loop detection: turns sketch curves into extrudable profiles.
-//!
-//! Current scope: every connected group of curves whose junctions all have
-//! exactly two curves forms one loop; circles are loops on their own. Loops
-//! nested inside other loops become holes. Branched networks (a line across
-//! a rectangle splitting it into two regions) are not split into regions yet.
+//! Profiles: the closed regions of a sketch that can be extruded or
+//! revolved. The region finding itself lives in `region.rs`.
 
-use crate::constraint::Constraint;
-use crate::sketch::{Entity, PointId, Sketch};
-use std::collections::HashMap;
+use crate::sketch::Sketch;
 use std::f64::consts::TAU;
-
-/// Points closer than this are treated as connected even without an
-/// explicit coincident constraint.
-const MERGE_TOL: f64 = 1e-6;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Segment {
@@ -167,31 +157,11 @@ impl Profile {
     }
 }
 
-/// Find every closed region in the sketch. Construction geometry is ignored.
+/// Find every closed region in the sketch – including regions formed by
+/// crossing curves. Construction geometry is ignored. Each profile is a
+/// counter-clockwise outer loop with clockwise holes.
 pub fn find_profiles(sk: &Sketch) -> Vec<Profile> {
-    let loops = find_loops(sk);
-
-    // Every loop becomes an outer boundary; loops directly inside it are its
-    // holes. Concentric circles thus give a disk *and* a ring, like Fusion.
-    let polys: Vec<Vec<[f64; 2]>> = loops.iter().map(Loop::polygon).collect();
-    let inside = |inner: usize, outer: usize| -> bool {
-        inner != outer
-            && polys[inner].iter().all(|p| point_in_polygon(*p, &polys[outer]))
-            && polygon_area(&polys[inner]).abs() < polygon_area(&polys[outer]).abs()
-    };
-
-    let mut profiles = Vec::new();
-    for o in 0..loops.len() {
-        let children: Vec<usize> = (0..loops.len()).filter(|&i| inside(i, o)).collect();
-        // direct children only: not inside another child
-        let holes = children
-            .iter()
-            .filter(|&&c| !children.iter().any(|&d| d != c && inside(c, d)))
-            .map(|&c| loops[c].reversed())
-            .collect();
-        profiles.push(Profile { outer: loops[o].clone(), holes });
-    }
-    profiles
+    crate::region::regions(sk)
 }
 
 /// Smallest profile containing `p` – what a click in the viewport selects.
@@ -204,123 +174,7 @@ pub fn profile_at(profiles: &[Profile], p: [f64; 2]) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// All closed loops, oriented counter-clockwise.
-pub fn find_loops(sk: &Sketch) -> Vec<Loop> {
-    let p = sk.params();
-    let mut uf = UnionFind::new(sk.points.len());
-    for (_, c) in sk.constraints() {
-        if let Constraint::Coincident(a, b) = *c {
-            uf.union(a.0, b.0);
-        }
-    }
-
-    let mut loops = Vec::new();
-    // (curve endpoints as point ids, segment going a→b)
-    let mut edges: Vec<(PointId, PointId, Segment)> = Vec::new();
-    for (id, e) in sk.entities() {
-        if sk.is_construction(id) {
-            continue;
-        }
-        match *e {
-            Entity::Line { a, b } => {
-                edges.push((a, b, Segment::Line { a: sk.pt(p, a), b: sk.pt(p, b) }))
-            }
-            Entity::Arc { center, start, end } => edges.push((
-                start,
-                end,
-                Segment::Arc {
-                    center: sk.pt(p, center),
-                    from: sk.pt(p, start),
-                    to: sk.pt(p, end),
-                    ccw: true,
-                },
-            )),
-            Entity::Circle { center, radius } => loops.push(Loop {
-                segments: vec![Segment::Circle {
-                    center: sk.pt(p, center),
-                    radius: p[radius.0],
-                    ccw: true,
-                }],
-            }),
-        }
-    }
-
-    // Merge endpoints that coincide numerically.
-    let endpoints: Vec<PointId> = edges.iter().flat_map(|(a, b, _)| [*a, *b]).collect();
-    for i in 0..endpoints.len() {
-        for j in i + 1..endpoints.len() {
-            let (a, b) = (sk.pt(p, endpoints[i]), sk.pt(p, endpoints[j]));
-            if (a[0] - b[0]).hypot(a[1] - b[1]) < MERGE_TOL {
-                uf.union(endpoints[i].0, endpoints[j].0);
-            }
-        }
-    }
-
-    // node -> incident edge indices
-    let mut incident: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, (a, b, _)) in edges.iter().enumerate() {
-        incident.entry(uf.find(a.0)).or_default().push(i);
-        incident.entry(uf.find(b.0)).or_default().push(i);
-    }
-
-    let mut used = vec![false; edges.len()];
-    for start_edge in 0..edges.len() {
-        if used[start_edge] {
-            continue;
-        }
-        let start_node = uf.find(edges[start_edge].0 .0);
-        let mut segments = Vec::new();
-        let mut node = start_node;
-        let mut edge = start_edge;
-        let mut ok = true;
-        let mut visited = Vec::new();
-        loop {
-            if used[edge] {
-                ok = false;
-                break;
-            }
-            used[edge] = true;
-            visited.push(edge);
-            let (a, b, seg) = &edges[edge];
-            let (na, nb) = (uf.find(a.0), uf.find(b.0));
-            let (seg, next) = if na == node { (seg.clone(), nb) } else { (seg.reversed(), na) };
-            segments.push(seg);
-            node = next;
-            if node == start_node {
-                break;
-            }
-            let inc = &incident[&node];
-            if inc.len() != 2 {
-                ok = false; // open end or branch
-                break;
-            }
-            edge = if inc[0] == edge { inc[1] } else { inc[0] };
-        }
-        // A valid loop also needs every node it passed to have degree 2.
-        let degree_ok = visited.iter().all(|&e| {
-            let (a, b, _) = &edges[e];
-            incident[&uf.find(a.0)].len() == 2 && incident[&uf.find(b.0)].len() == 2
-        });
-        if ok && degree_ok && !segments.is_empty() {
-            let lp = Loop { segments };
-            loops.push(if lp.signed_area() < 0.0 { lp.reversed() } else { lp });
-        }
-    }
-    loops
-}
-
-fn polygon_area(pts: &[[f64; 2]]) -> f64 {
-    let n = pts.len();
-    (0..n)
-        .map(|i| {
-            let (a, b) = (pts[i], pts[(i + 1) % n]);
-            a[0] * b[1] - b[0] * a[1]
-        })
-        .sum::<f64>()
-        * 0.5
-}
-
-fn point_in_polygon(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
+pub(crate) fn point_in_polygon(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
     let mut inside = false;
     let n = poly.len();
     let mut j = n.wrapping_sub(1);
@@ -334,29 +188,4 @@ fn point_in_polygon(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
         j = i;
     }
     inside
-}
-
-struct UnionFind {
-    parent: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        Self { parent: (0..n).collect() }
-    }
-
-    fn find(&mut self, mut x: usize) -> usize {
-        while self.parent[x] != x {
-            self.parent[x] = self.parent[self.parent[x]];
-            x = self.parent[x];
-        }
-        x
-    }
-
-    fn union(&mut self, a: usize, b: usize) {
-        let (ra, rb) = (self.find(a), self.find(b));
-        if ra != rb {
-            self.parent[ra] = rb;
-        }
-    }
 }
