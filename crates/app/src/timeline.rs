@@ -28,6 +28,7 @@ fn feature_icon(kind: &FeatureKind) -> Icon {
         FeatureKind::Plane(p) if p.base2.is_some() => Icon::Midplane,
         FeatureKind::Plane(_) => Icon::Plane,
         FeatureKind::Draft(_) => Icon::Draft,
+        FeatureKind::Thread(_) => Icon::Thread,
         FeatureKind::Axis(_) => Icon::Axis,
         FeatureKind::PressPull(_) => Icon::PressPull,
         FeatureKind::Shell(_) => Icon::Shell,

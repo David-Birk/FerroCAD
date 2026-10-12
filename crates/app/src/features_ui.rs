@@ -4,13 +4,14 @@
 //! operation). Picking, highlighting, live preview and editing are shared.
 
 use crate::app::{FerroApp, Mode};
-use crate::dialogs::{command_dialog, expression_field, form_label, DialogAction};
+use crate::dialogs::{command_dialog, expression_field, fmt_value, form_label, DialogAction};
 use crate::icons::{self, Icon};
 use crate::sketch_ui::entity_polyline;
 use crate::theme;
 use egui::{Color32, Pos2, RichText, Stroke};
 use ferrocad_model::geom::{add, dot, normalize, scale, sub, Vec3};
 use ferrocad_model::*;
+use ferrocad_model::thread;
 use ferrocad_sketch::find_profiles;
 use ferrocad_sketch::profile::profile_at;
 use ferrocad_sketch::{EntityId, PointId};
@@ -21,6 +22,7 @@ pub enum FeatureType {
     PressPull,
     Shell,
     Draft,
+    Thread,
     Hole,
     Mirror,
     RectPattern,
@@ -43,6 +45,7 @@ impl FeatureType {
             FeatureType::PressPull => "Press Pull",
             FeatureType::Shell => "Shell",
             FeatureType::Draft => "Draft",
+            FeatureType::Thread => "Thread",
             FeatureType::Hole => "Hole",
             FeatureType::Mirror => "Mirror",
             FeatureType::RectPattern => "Rectangular Pattern",
@@ -65,6 +68,7 @@ impl FeatureType {
             FeatureType::PressPull => Icon::PressPull,
             FeatureType::Shell => Icon::Shell,
             FeatureType::Draft => Icon::Draft,
+            FeatureType::Thread => Icon::Thread,
             FeatureType::Hole => Icon::Hole,
             FeatureType::Mirror => Icon::Mirror,
             FeatureType::RectPattern => Icon::RectPattern,
@@ -194,6 +198,9 @@ pub struct FeatureSession {
     pub flags: Vec<(&'static str, bool)>,
     /// Index into `Operation::ALL` (loft, sweep) or `CombineOp::ALL` (combine).
     pub op: usize,
+    /// Thread size: index into `thread::METRIC` plus one (0 = none for
+    /// holes, auto for threads).
+    pub thread: usize,
     /// Patterns: repeat features instead of bodies.
     pub pattern_features: bool,
     pub features: Vec<FeatureId>,
@@ -214,6 +221,7 @@ impl FeatureSession {
         let (sels, exprs, flags): (Vec<SelInput>, Vec<ExprInput>, Vec<(&str, bool)>) = match ty {
             T::PressPull => (vec![sel("Face", K::FlatFace, false)], vec![expr("Distance", "5 mm", "mm")], vec![]),
             T::Shell => (vec![sel("Faces to remove", K::Face, true)], vec![expr("Thickness", "1 mm", "mm")], vec![]),
+            T::Thread => (vec![sel("Cylindrical face", K::Face, false)], vec![expr("Length", "10 mm", "mm")], vec![("Full length", true)]),
             T::Draft => (
                 vec![sel("Faces", K::Face, true), sel("Pull direction", K::Plane, false)],
                 vec![expr("Angle", "3°", "°")],
@@ -309,6 +317,7 @@ impl FeatureSession {
             exprs,
             flags,
             op: 0,
+            thread: 0,
             pattern_features: false,
             features: Vec::new(),
         };
@@ -480,6 +489,7 @@ impl FeatureSession {
                     2 => HoleHead::Countersink { diameter: self.e(2), angle: self.e(4) },
                     _ => HoleHead::None,
                 },
+                thread: (self.thread > 0).then(|| thread::METRIC[(self.thread - 1).min(thread::METRIC.len() - 1)].0.to_string()),
             }),
             T::Mirror => FeatureKind::Mirror(MirrorFeature {
                 bodies: self.bodies(0)?,
@@ -570,6 +580,14 @@ impl FeatureSession {
                 angle: "0".into(),
                 base2: Some(self.plane(1)?),
             }),
+            T::Thread => FeatureKind::Thread(ThreadFeature {
+                face: self.face(0)?,
+                size: match self.thread {
+                    0 => "auto".into(),
+                    i => thread::METRIC[(i - 1).min(thread::METRIC.len() - 1)].0.into(),
+                },
+                length: (!self.flags[0].1).then(|| self.e(0)),
+            }),
             T::Draft => {
                 let faces: Vec<FaceRef> =
                     self.sels[0].picks.iter().filter_map(|p| if let Pick::Face(f) = p { Some(*f) } else { None }).collect();
@@ -607,6 +625,24 @@ impl FeatureSession {
         })
     }
 
+    /// A session of type `ty` editing feature `id`, filled with its values.
+    fn edit_from(id: FeatureId, ty: FeatureType, picks: Vec<Vec<Pick>>, exprs: Vec<String>, flags: Vec<bool>, op: usize) -> Self {
+        let mut s = Self::blank(ty);
+        s.editing = Some(id);
+        for (input, p) in s.sels.iter_mut().zip(picks) {
+            input.picks = p;
+        }
+        for (input, t) in s.exprs.iter_mut().zip(exprs) {
+            input.text = t;
+        }
+        for (flag, v) in s.flags.iter_mut().zip(flags) {
+            flag.1 = v;
+        }
+        s.op = op;
+        s.active = s.first_empty();
+        s
+    }
+
     /// A dialog for editing an existing feature (None for kinds with their
     /// own dialog).
     pub fn edit(id: FeatureId, kind: &FeatureKind) -> Option<Self> {
@@ -628,7 +664,21 @@ impl FeatureSession {
                         (points.iter().map(|q| Pick::SketchPoint(*sketch, *q)).collect(), *flip)
                     }
                 };
-                (T::Hole, vec![picks], vec![h.diameter.clone(), h.depth.clone(), hd, hdepth, angle], vec![h.through, flip], op)
+                let mut s = Self::edit_from(id, T::Hole, vec![picks], vec![h.diameter.clone(), h.depth.clone(), hd, hdepth, angle], vec![h.through, flip], op);
+                s.thread = size_index(h.thread.as_deref());
+                return Some(s);
+            }
+            FeatureKind::Thread(t) => {
+                let mut s = Self::edit_from(
+                    id,
+                    T::Thread,
+                    vec![vec![Pick::Face(t.face)]],
+                    vec![t.length.clone().unwrap_or_else(|| "10 mm".into())],
+                    vec![t.length.is_none()],
+                    0,
+                );
+                s.thread = size_index(Some(t.size.as_str()));
+                return Some(s);
             }
             FeatureKind::Mirror(m) => (
                 T::Mirror,
@@ -721,18 +771,7 @@ impl FeatureSession {
             }
             _ => return None,
         };
-        let mut s = Self::blank(ty);
-        s.editing = Some(id);
-        for (input, p) in s.sels.iter_mut().zip(picks) {
-            input.picks = p;
-        }
-        for (input, t) in s.exprs.iter_mut().zip(exprs) {
-            input.text = t;
-        }
-        for (flag, v) in s.flags.iter_mut().zip(flags) {
-            flag.1 = v;
-        }
-        s.op = op;
+        let mut s = Self::edit_from(id, ty, picks, exprs, flags, op);
         if let FeatureKind::Pattern(p) = kind {
             if !p.features.is_empty() {
                 s.set_pattern_features(true);
@@ -1217,12 +1256,34 @@ impl FerroApp {
                 });
                 ui.end_row();
             }
+            if matches!(sess.ty, FeatureType::Hole | FeatureType::Thread) {
+                let hole = sess.ty == FeatureType::Hole;
+                form_label(ui, if hole { "Tapped" } else { "Size" });
+                let name = |i: usize| match i {
+                    0 if hole => "No".to_string(),
+                    0 => "Auto (fits the face)".to_string(),
+                    i => {
+                        let (n, d, p) = thread::METRIC[i - 1];
+                        if hole { format!("{n} (tap drill {})", fmt_value(d - p, "mm")) } else { format!("{n} × {p}") }
+                    }
+                };
+                egui::ComboBox::from_id_salt("thread_size").selected_text(name(sess.thread)).show_ui(ui, |ui| {
+                    for i in 0..=thread::METRIC.len() {
+                        ui.selectable_value(&mut sess.thread, i, name(i));
+                    }
+                });
+                ui.end_row();
+            }
             let (ty, op) = (sess.ty, sess.op);
             let limits_on = sess.ty == FeatureType::Joint && sess.flags.get(1).is_some_and(|f| f.1);
+            let tapped = sess.thread > 0;
+            let full_length = sess.ty == FeatureType::Thread && sess.flags[0].1;
             for (i, e) in sess.exprs.iter_mut().enumerate() {
                 // Hole head values only for the chosen head type.
                 let shown = match ty {
-                    FeatureType::Hole => i < 2 || (op == 1 && i < 4) || (op == 2 && (i == 2 || i == 4)),
+                    // A tapped hole's diameter comes from its size.
+                    FeatureType::Hole => (i == 0 && !tapped) || i == 1 || (op == 1 && (i == 2 || i == 3)) || (op == 2 && (i == 2 || i == 4)),
+                    FeatureType::Thread => !full_length,
                     // Joint limits only when switched on.
                     FeatureType::Joint => i < 2 || limits_on,
                     _ => true,
@@ -1309,6 +1370,11 @@ impl FerroApp {
             },
         }
     }
+}
+
+/// `FeatureSession::thread` index of a size ("M5"); 0 for none/auto.
+fn size_index(size: Option<&str>) -> usize {
+    size.and_then(|n| thread::METRIC.iter().position(|(m, ..)| m.eq_ignore_ascii_case(n.trim()))).map_or(0, |i| i + 1)
 }
 
 /// Opacity of face and profile highlight fills.

@@ -24,6 +24,7 @@ pub enum Icon {
     PressPull,
     Shell,
     Draft,
+    Thread,
     Midplane,
     Hole,
     Mirror,
@@ -283,6 +284,14 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32, enabled:
             p.line(&[(0.3, 0.18), (0.3, 0.86)], faded(c, 110));
             p.line(&[(0.06, 0.86), (0.94, 0.86)], theme::ORANGE);
             p.arrow(&[(0.5, 0.7), (0.5, 0.04)], a);
+        }
+        Thread => {
+            p.line(&[(0.3, 0.12), (0.3, 0.88)], faded(c, 140));
+            p.line(&[(0.7, 0.12), (0.7, 0.88)], faded(c, 140));
+            for k in 0..4 {
+                let y = 0.18 + 0.18 * k as f32;
+                p.thick(&[(0.3, y + 0.09), (0.7, y)], a, 1.5);
+            }
         }
         Midplane => {
             p.line(&[(0.08, 0.88), (0.6, 0.88), (0.92, 0.6)], c);

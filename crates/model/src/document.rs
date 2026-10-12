@@ -528,6 +528,69 @@ impl Document {
                 Ok(())
             }
 
+            FeatureKind::Thread(t) => {
+                let t = t.clone();
+                let (bi, _) = find_face(k, model, &t.face)?;
+                let cyl = k.cylinder(&model.bodies[bi].solid, &t.face).ok_or("pick a cylindrical face")?;
+                let external = cyl.outward;
+                let size = if t.size.trim().eq_ignore_ascii_case("auto") {
+                    crate::thread::size_for(2.0 * cyl.radius, external).to_string()
+                } else {
+                    t.size.clone()
+                };
+                let (major, pitch) = crate::thread::metric(&size).ok_or_else(|| format!("unknown thread size {size}"))?;
+                let depth = crate::thread::groove_depth(pitch);
+                let eps = 0.05 * pitch;
+                // Shafts: the cylinder is the major diameter. Bores: cut out to it.
+                let (base, apex) = if external { (cyl.radius + eps, cyl.radius - depth) } else { (cyl.radius - eps, major / 2.0) };
+                if apex <= 0.0 || (!external && apex <= cyl.radius) {
+                    return Err(format!("{size} doesn't fit this {:.2} mm cylinder", 2.0 * cyl.radius));
+                }
+                let total = cyl.to - cyl.from;
+                let length = match &t.length {
+                    Some(l) => {
+                        let l = eval(l)?;
+                        if l <= 0.0 {
+                            return Err("thread length must be positive".into());
+                        }
+                        l.min(total)
+                    }
+                    None => total,
+                };
+                // Start at the end nearer the picked point and run past it a little.
+                let at = dot(sub(t.face.point, cyl.origin), cyl.axis);
+                let (from, to) = if at - cyl.from <= cyl.to - at {
+                    (cyl.from - pitch, cyl.from + length)
+                } else {
+                    (cyl.to - length, cyl.to + pitch)
+                };
+                let groove = k.thread_groove(cyl.origin, cyl.axis, base, apex, pitch, from, to).map_err(kerr)?;
+                let mut solid = model.bodies[bi].solid.clone();
+                // A bore: plug it, cut the thread, drill again (OCCT misses the
+                // groove crossing an existing bore wall).
+                let plug = if external {
+                    None
+                } else {
+                    let center = add(cyl.origin, scale(cyl.axis, cyl.from));
+                    let profile = PlacedProfile {
+                        outer: Loop3 { segments: vec![Seg3::Circle { center, normal: cyl.axis, radius: cyl.radius }] },
+                        holes: vec![],
+                        normal: cyl.axis,
+                    };
+                    let plug = k.extrude(&profile, cyl.to - cyl.from, false).map_err(kerr)?;
+                    solid = k.boolean(BooleanOp::Union, &solid, &plug).map_err(kerr)?;
+                    Some(plug)
+                };
+                solid = k.boolean(BooleanOp::Subtract, &solid, &groove).map_err(kerr)?;
+                if let Some(plug) = plug {
+                    solid = k.boolean(BooleanOp::Subtract, &solid, &plug).map_err(kerr)?;
+                }
+                model.bodies[bi].solid = solid;
+                let name = model.bodies[bi].name.clone();
+                record_tool(model, id, groove, Operation::Cut, vec![name]);
+                Ok(())
+            }
+
             FeatureKind::Draft(d) => {
                 let d = d.clone();
                 let angle = eval(&d.angle)?;
@@ -568,7 +631,15 @@ impl Document {
 
             FeatureKind::Hole(h) => {
                 let h = h.clone();
-                let diameter = eval(&h.diameter)?;
+                // Tapped holes are drilled at the tap drill size.
+                let tap = match &h.thread {
+                    Some(size) => Some(crate::thread::metric(size).ok_or_else(|| format!("unknown thread size {size}"))?),
+                    None => None,
+                };
+                let diameter = match tap {
+                    Some((major, pitch)) => major - pitch,
+                    None => eval(&h.diameter)?,
+                };
                 if diameter <= 0.0 {
                     return Err("diameter must be positive".into());
                 }
@@ -609,7 +680,7 @@ impl Document {
                     return Err("no body to drill into".into());
                 }
                 let mut tools = Vec::new();
-                for (on_face, n) in sites {
+                for &(on_face, n) in &sites {
                     // Start a little above the face so the cut is clean.
                     let eps = 0.01;
                     let center = add(on_face, scale(n, eps));
@@ -651,6 +722,38 @@ impl Document {
                         }
                     }
                 }
+                // Threads are cut before drilling: OCCT misses grooves that
+                // cross an existing bore wall.
+                let mut grooves = Vec::new();
+                if let Some((major, pitch)) = tap {
+                    let eps = 0.05 * pitch;
+                    for &(on_face, n) in &sites {
+                        let axis = scale(n, -1.0);
+                        // Through holes: thread as far as the bodies reach.
+                        let length = if h.through {
+                            targets
+                                .iter()
+                                .filter_map(|b| k.bounds(&model.bodies[*b].solid))
+                                .flat_map(|(lo, hi)| {
+                                    (0..8).map(move |c| {
+                                        let p = [if c & 1 == 0 { lo[0] } else { hi[0] }, if c & 2 == 0 { lo[1] } else { hi[1] }, if c & 4 == 0 { lo[2] } else { hi[2] }];
+                                        dot(sub(p, on_face), axis)
+                                    })
+                                })
+                                .fold(0.0, f64::max)
+                        } else {
+                            depth
+                        };
+                        if length > 0.0 {
+                            let groove = k
+                                .thread_groove(on_face, axis, diameter / 2.0 - eps, major / 2.0, pitch, -pitch, length)
+                                .map_err(kerr)?;
+                            grooves.push(groove);
+                        }
+                    }
+                }
+                grooves.append(&mut tools);
+                let tools = grooves;
                 let names: Vec<String> = targets.iter().map(|b| model.bodies[*b].name.clone()).collect();
                 for b in targets {
                     for tool in &tools {

@@ -8,8 +8,8 @@
 use ferrocad_model::geom::{distance, scale, Vec3};
 use ferrocad_model::kernel::polyline_midpoint;
 use ferrocad_model::{
-    BooleanOp, EdgeRef, FaceInfo, FaceRef, Kernel, KernelError, Loop3, MassProperties, PlacedProfile, Seg3,
-    ThinSide, Transform, TriMesh,
+    BooleanOp, CylinderInfo, EdgeRef, FaceInfo, FaceRef, Kernel, KernelError, Loop3, MassProperties,
+    PlacedProfile, Seg3, ThinSide, Transform, TriMesh,
 };
 use glam::{dvec3, DVec3};
 use opencascade::primitives::Shape;
@@ -302,6 +302,36 @@ impl Kernel for OcctKernel {
         safe::properties(solid).map(|(volume, area, c)| MassProperties { volume, area, center: a(c) })
     }
 
+    fn cylinder(&self, solid: &Self::Solid, face: &FaceRef) -> Option<CylinderInfo> {
+        let (i, _) = face_index(solid, face).ok()?;
+        safe::cylinder(solid, i).map(|c| CylinderInfo {
+            origin: a(c.origin),
+            axis: a(c.axis.normalize()),
+            radius: c.radius,
+            from: c.from,
+            to: c.to,
+            outward: c.outward,
+        })
+    }
+
+    fn bounds(&self, solid: &Self::Solid) -> Option<(Vec3, Vec3)> {
+        safe::bounds(solid).map(|(lo, hi)| (a(lo), a(hi)))
+    }
+
+    fn thread_groove(
+        &self,
+        origin: Vec3,
+        axis: Vec3,
+        base_radius: f64,
+        apex_radius: f64,
+        pitch: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self::Solid, KernelError> {
+        let groove = safe::thread_groove(v(origin), v(axis), base_radius, apex_radius, pitch, from, to).map_err(err)?;
+        Ok(Rc::new(groove))
+    }
+
     fn face_area(&self, solid: &Self::Solid, face: &FaceRef) -> Option<f64> {
         let (i, _) = face_index(solid, face).ok()?;
         safe::properties(&safe::face(solid, i).ok()?).map(|(_, area, _)| area)
@@ -478,6 +508,51 @@ mod tests {
     }
 
     #[test]
+    fn modelled_threads() {
+        let k = OcctKernel::new();
+        let circle = |r: f64| PlacedProfile {
+            outer: Loop3 { segments: vec![Seg3::Circle { center: [0.0; 3], normal: [0.0, 0.0, 1.0], radius: r }] },
+            holes: vec![],
+            normal: [0.0, 0.0, 1.0],
+        };
+        // M5 shaft, 10 long.
+        let shaft = k.extrude(&circle(2.5), 10.0, false).unwrap();
+        let side = FaceRef { point: [2.5, 0.0, 5.0], normal: [1.0, 0.0, 0.0] };
+        let c = k.cylinder(&shaft, &side).expect("a cylinder");
+        assert!(c.outward && (c.radius - 2.5).abs() < 1e-9 && (c.to - c.from - 10.0).abs() < 1e-6, "{c:?}");
+        assert!(k.cylinder(&shaft, &FaceRef { point: [0.0, 0.0, 10.0], normal: [0.0, 0.0, 1.0] }).is_none());
+        let depth = ferrocad_model::thread::groove_depth(0.8);
+        // Axial positions are relative to the cylinder's own axis (which may point down).
+        let groove = k.thread_groove(c.origin, c.axis, 2.54, 2.5 - depth, 0.8, c.from - 0.8, c.to).unwrap();
+        let threaded = k.boolean(BooleanOp::Subtract, &shaft, &groove).unwrap();
+        // Removed: the triangle (depth² · tan 30°, minus the sliver outside) along ~13.5 turns.
+        let removed = volume(&k, &shaft) - volume(&k, &threaded);
+        let ring = depth * depth * (std::f64::consts::PI / 6.0).tan() * 2.0 * std::f64::consts::PI * (2.5 - depth / 3.0) * (10.0 / 0.8);
+        assert!(removed > 0.6 * ring && removed < 1.2 * ring, "{removed} vs {ring}");
+        assert_eq!(safe::solid_count(&threaded), 1);
+
+        // M5 bore (tap drill 4.2) in a block: internal thread out to 2.5.
+        let block = k.extrude(&rect(10.0, 10.0), 8.0, false).unwrap();
+        let bore = k.extrude(&PlacedProfile { outer: Loop3 { segments: vec![Seg3::Circle { center: [5.0, 5.0, 0.0], normal: [0.0, 0.0, 1.0], radius: 2.1 }] }, holes: vec![], normal: [0.0, 0.0, 1.0] }, 8.0, false).unwrap();
+        let drilled = k.boolean(BooleanOp::Subtract, &block, &bore).unwrap();
+        let wall = FaceRef { point: [7.1, 5.0, 4.0], normal: [-1.0, 0.0, 0.0] };
+        let c = k.cylinder(&drilled, &wall).expect("the bore");
+        assert!(!c.outward && (c.radius - 2.1).abs() < 1e-9, "{c:?}");
+        let groove = k.thread_groove(c.origin, c.axis, 2.06, 2.5, 0.8, c.from - 0.8, c.to + 0.8).unwrap();
+        // OCCT misses the groove crossing an existing bore wall, so the model
+        // plugs the bore, cuts the thread and drills again; check that path.
+        assert!(k.boolean(BooleanOp::Intersect, &drilled, &groove).map(|s| volume(&k, &s)).unwrap_or(0.0) < 1e-6);
+        let plugged = k.boolean(BooleanOp::Union, &drilled, &bore).unwrap();
+        let cut = k.boolean(BooleanOp::Subtract, &plugged, &groove).unwrap();
+        let tapped = k.boolean(BooleanOp::Subtract, &cut, &bore).unwrap();
+        let removed = volume(&k, &drilled) - volume(&k, &tapped);
+        assert!(removed > 10.0 && removed < 18.6, "{removed}");
+        assert_eq!(safe::solid_count(&tapped), 1);
+        let (lo, hi) = k.bounds(&tapped).unwrap();
+        assert!((hi[2] - lo[2] - 8.0).abs() < 0.1, "bounds include tolerance gaps: {lo:?} {hi:?}");
+    }
+
+    #[test]
     fn step_roundtrip_keeps_every_solid() {
         let k = OcctKernel::new();
         let a = k.extrude(&rect(10.0, 20.0), 5.0, false).unwrap();
@@ -578,6 +653,7 @@ mod hole_tests {
                 depth: "0".into(),
                 through: true,
                 head: HoleHead::Counterbore { diameter: "8".into(), depth: "3".into() },
+                thread: None,
             }),
         );
         doc.add(
@@ -588,6 +664,7 @@ mod hole_tests {
                 depth: "0".into(),
                 through: true,
                 head: HoleHead::Countersink { diameter: "8".into(), angle: "90".into() },
+                thread: None,
             }),
         );
         let m = doc.rebuild(&k);

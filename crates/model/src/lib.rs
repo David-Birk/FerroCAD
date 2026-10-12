@@ -14,13 +14,14 @@ pub mod json;
 pub mod kernel;
 pub mod params;
 pub mod project;
+pub mod thread;
 
 pub use document::{Body, Document, FeatureStatus, Model, ViewState};
 pub use feature::*;
 pub use geom::{Plane, Vec3};
 pub use history::History;
 pub use kernel::{
-    BooleanOp, EdgeRef, FaceInfo, FaceRef, Kernel, KernelError, Loop3, MassProperties, PlacedProfile, Seg3,
-    Transform, TriMesh,
+    BooleanOp, CylinderInfo, EdgeRef, FaceInfo, FaceRef, Kernel, KernelError, Loop3, MassProperties,
+    PlacedProfile, Seg3, Transform, TriMesh,
 };
 pub use params::{ParamTable, Parameter};

@@ -16,6 +16,9 @@ mod inner {
             chamfer: bool,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
         pub fn ferro_thin_band(face: &TopoDS_Shape, p: &[f64]) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn ferro_cylinder(shape: &TopoDS_Shape, index: u32) -> Vec<f64>;
+        pub fn ferro_bounds(shape: &TopoDS_Shape) -> Vec<f64>;
+        pub fn ferro_thread_groove(p: &[f64]) -> Result<UniquePtr<TopoDS_Shape>>;
         pub fn ferro_chamfer2(shape: &TopoDS_Shape, edges: &[u32], d1: f64, d2: f64) -> Result<UniquePtr<TopoDS_Shape>>;
         pub fn ferro_draft(shape: &TopoDS_Shape, faces: &[u32], p: &[f64]) -> Result<UniquePtr<TopoDS_Shape>>;
         pub fn ferro_boolean(a: &TopoDS_Shape, b: &TopoDS_Shape, op: u32) -> Result<UniquePtr<TopoDS_Shape>>;

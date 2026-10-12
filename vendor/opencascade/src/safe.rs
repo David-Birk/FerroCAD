@@ -28,6 +28,53 @@ pub fn thin_band(face: &Shape, dir: DVec3, forward: f64, backward: f64, grow: f6
     wrap(ferro::ferro_thin_band(&face.inner, &[dir.x, dir.y, dir.z, backward, forward, grow, shrink]))
 }
 
+/// A cylindrical face found by index.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CylinderHit {
+    pub origin: DVec3,
+    pub axis: DVec3,
+    pub radius: f64,
+    /// Axial extent of the face from `origin` along `axis`.
+    pub from: f64,
+    pub to: f64,
+    /// The face's normal points away from the axis (outer surface).
+    pub outward: bool,
+}
+
+/// Cylinder data of face `index` (None if it isn't a cylinder).
+pub fn cylinder(shape: &Shape, index: u32) -> Option<CylinderHit> {
+    let v = ferro::ferro_cylinder(&shape.inner, index);
+    (v.len() == 10).then(|| CylinderHit {
+        origin: DVec3::new(v[0], v[1], v[2]),
+        axis: DVec3::new(v[3], v[4], v[5]),
+        radius: v[6],
+        from: v[7],
+        to: v[8],
+        outward: v[9] > 0.5,
+    })
+}
+
+/// (min, max) corners of the bounding box.
+pub fn bounds(shape: &Shape) -> Option<(DVec3, DVec3)> {
+    let v = ferro::ferro_bounds(&shape.inner);
+    (v.len() == 6).then(|| (DVec3::new(v[0], v[1], v[2]), DVec3::new(v[3], v[4], v[5])))
+}
+
+/// Helical 60° groove swept from axial position `from` to `to`: base on
+/// `base_radius`, apex on `apex_radius`.
+pub fn thread_groove(
+    origin: DVec3,
+    axis: DVec3,
+    base_radius: f64,
+    apex_radius: f64,
+    pitch: f64,
+    from: f64,
+    to: f64,
+) -> SafeResult {
+    let p = [origin.x, origin.y, origin.z, axis.x, axis.y, axis.z, base_radius, apex_radius, pitch, from, to];
+    wrap(ferro::ferro_thread_groove(&p))
+}
+
 /// Chamfer edges with `d1` on the first adjacent face and `d2` on the other.
 pub fn chamfer2(shape: &Shape, edges: &[u32], d1: f64, d2: f64) -> SafeResult {
     wrap(ferro::ferro_chamfer2(&shape.inner, edges, d1, d2))

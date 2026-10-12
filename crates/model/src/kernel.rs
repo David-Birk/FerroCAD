@@ -108,6 +108,20 @@ pub struct FaceInfo {
     pub planar: bool,
 }
 
+/// A cylindrical face: axis, radius and axial extent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CylinderInfo {
+    pub origin: Vec3,
+    /// Unit axis direction.
+    pub axis: Vec3,
+    pub radius: f64,
+    /// Axial extent of the face, measured from `origin` along `axis`.
+    pub from: f64,
+    pub to: f64,
+    /// Outer surface (shaft) rather than a bore.
+    pub outward: bool,
+}
+
 /// A rigid motion or reflection.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Transform {
@@ -254,6 +268,27 @@ pub trait Kernel {
     fn is_empty(&self, solid: &Self::Solid) -> bool;
 
     fn properties(&self, solid: &Self::Solid) -> Option<MassProperties>;
+
+    /// The cylindrical face matched by `face` (None if it isn't one).
+    fn cylinder(&self, solid: &Self::Solid, face: &FaceRef) -> Option<CylinderInfo>;
+
+    /// Axis-aligned bounds of a solid (min, max).
+    fn bounds(&self, solid: &Self::Solid) -> Option<(Vec3, Vec3)>;
+
+    /// A helical 60° V groove around the axis through `origin` along unit
+    /// `axis`, from axial position `from` to `to`: its base lies on
+    /// `base_radius`, its tip on `apex_radius`.
+    #[allow(clippy::too_many_arguments)]
+    fn thread_groove(
+        &self,
+        origin: Vec3,
+        axis: Vec3,
+        base_radius: f64,
+        apex_radius: f64,
+        pitch: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self::Solid, KernelError>;
 
     /// Exact area of the face matched by `face` (None if unsupported).
     fn face_area(&self, _solid: &Self::Solid, _face: &FaceRef) -> Option<f64> {

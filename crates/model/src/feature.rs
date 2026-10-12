@@ -280,6 +280,20 @@ pub struct HoleFeature {
     /// Through all instead of `depth`.
     pub through: bool,
     pub head: HoleHead,
+    /// Tapped: ISO metric size ("M5"). The hole is drilled at the tap drill
+    /// diameter (ignoring `diameter`) and the thread is modelled.
+    pub thread: Option<String>,
+}
+
+/// A modelled ISO metric thread on a cylindrical face: outer surfaces get an
+/// external thread, bores an internal one. It starts at the end of the face
+/// nearer to `face.point` and runs `length` along it (`None`: full length).
+#[derive(Clone, Debug)]
+pub struct ThreadFeature {
+    pub face: FaceRef,
+    /// "M5", or "auto" for the size that fits the cylinder.
+    pub size: String,
+    pub length: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -494,6 +508,7 @@ pub enum FeatureKind {
     PressPull(PressPullFeature),
     Shell(ShellFeature),
     Draft(DraftFeature),
+    Thread(ThreadFeature),
     Hole(HoleFeature),
     Mirror(MirrorFeature),
     Pattern(PatternFeature),
@@ -519,6 +534,7 @@ impl FeatureKind {
             FeatureKind::Plane(p) if p.base2.is_some() => "Midplane",
             FeatureKind::Plane(_) => "Construction plane",
             FeatureKind::Draft(_) => "Draft",
+            FeatureKind::Thread(_) => "Thread",
             FeatureKind::Axis(_) => "Construction axis",
             FeatureKind::PressPull(_) => "Press Pull",
             FeatureKind::Shell(_) => "Shell",
@@ -576,6 +592,7 @@ impl FeatureKind {
                 v
             }
             FeatureKind::Draft(d) => vec![("Angle (°)", &mut d.angle)],
+            FeatureKind::Thread(t) => t.length.iter_mut().map(|l| ("Length", l)).collect(),
             FeatureKind::Plane(p) => vec![("Offset", &mut p.offset), ("Angle (°)", &mut p.angle)],
             FeatureKind::PressPull(p) => vec![("Distance", &mut p.distance)],
             FeatureKind::Shell(sh) => vec![("Thickness", &mut sh.thickness)],

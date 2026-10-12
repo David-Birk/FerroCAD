@@ -72,7 +72,7 @@ fn shell_hole_and_remove() {
     doc.add("Shell1", FeatureKind::Shell(ShellFeature { faces: vec![top_face()], thickness: "1".into() }));
     doc.add(
         "Hole1",
-        FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(top_face()), diameter: "4".into(), depth: "3".into(), through: false, head: HoleHead::None }),
+        FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(top_face()), diameter: "4".into(), depth: "3".into(), through: false, head: HoleHead::None, thread: None }),
     );
     let m = doc.rebuild(&Mock);
     assert!(m.errors().next().is_none());
@@ -241,7 +241,7 @@ fn every_new_feature_roundtrips_through_fcad() {
     doc.add("Axis2", FeatureKind::Axis(AxisFeature { source: AxisSource::FaceNormal(top_face()) }));
     doc.add("PP", FeatureKind::PressPull(PressPullFeature { face: top_face(), distance: "1".into() }));
     doc.add("Shell", FeatureKind::Shell(ShellFeature { faces: vec![top_face()], thickness: "1".into() }));
-    doc.add("Hole", FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(top_face()), diameter: "3".into(), depth: "2".into(), through: true, head: HoleHead::None }));
+    doc.add("Hole", FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(top_face()), diameter: "3".into(), depth: "2".into(), through: true, head: HoleHead::None, thread: None }));
     doc.add("Mirror", FeatureKind::Mirror(MirrorFeature { bodies: vec!["Body1".into()], plane: PlaneRef::Origin(OriginPlane::XZ), join: true }));
     doc.add(
         "PatR",
@@ -327,7 +327,7 @@ fn revolve_around_world_and_construction_axes() {
 fn counterbore_and_countersink_add_tools() {
     let (mut doc, _, _) = plate_document();
     let hole = |head| {
-        FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(top_face()), diameter: "4".into(), depth: "3".into(), through: false, head })
+        FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(top_face()), diameter: "4".into(), depth: "3".into(), through: false, head, thread: None })
     };
     doc.add("Hole1", hole(HoleHead::Counterbore { diameter: "8".into(), depth: "2".into() }));
     doc.add("Hole2", hole(HoleHead::Countersink { diameter: "8".into(), angle: "90".into() }));
@@ -679,6 +679,7 @@ fn holes_on_sketch_points_and_feature_patterns() {
             depth: "3".into(),
             through: false,
             head: HoleHead::None,
+            thread: None,
         }),
     );
     let m = doc.rebuild(&Mock);
@@ -723,4 +724,53 @@ fn holes_on_sketch_points_and_feature_patterns() {
     let m = doc.rebuild(&Mock);
     assert!(matches!(m.status(hole), FeatureStatus::Error(_)));
     assert!(matches!(m.status(pattern), FeatureStatus::Error(_)), "nothing left to pattern");
+}
+
+#[test]
+fn threads_on_shafts_and_bores_and_tapped_holes() {
+    let (mut doc, _, _) = plate_document();
+    // Outer surface of the mock cylinder (radius 2.5): external, auto = M5.
+    let shaft = FaceRef { point: [12.5, 5.0, 9.0], normal: [1.0, 0.0, 0.0] };
+    let t = doc.add("Thread1", FeatureKind::Thread(ThreadFeature { face: shaft, size: "auto".into(), length: None }));
+    let m = doc.rebuild(&Mock);
+    assert_eq!(*m.status(t), FeatureStatus::Ok, "{:?}", m.status(t));
+    // Starts at the top end (nearer the picked z = 9) and runs over the full length.
+    assert!(body_descs(&m)[0].contains("rb=2.540, ra=2.067, p=0.8, 0.00..10.80"), "{:?}", body_descs(&m));
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
+
+    // A bore with a fixed length from the bottom end: internal, cut out to M6 (major 3 mm radius).
+    if let FeatureKind::Thread(th) = &mut doc.feature_mut(t).unwrap().kind {
+        th.face = FaceRef { point: [12.5, 5.0, 1.0], normal: [-1.0, 0.0, 0.0] };
+        th.size = "M6".into();
+        th.length = Some("4".into());
+    }
+    let m = doc.rebuild(&Mock);
+    assert!(body_descs(&m)[0].contains("rb=2.450, ra=3.000, p=1, -1.00..4.00"), "{:?}", body_descs(&m));
+    assert_eq!(doc.feature_mut(t).unwrap().kind.expressions_mut().len(), 1);
+    // Sizes that can't fit are errors.
+    if let FeatureKind::Thread(th) = &mut doc.feature_mut(t).unwrap().kind {
+        th.size = "M3".into();
+    }
+    assert!(matches!(doc.rebuild(&Mock).status(t), FeatureStatus::Error(_)));
+    doc.remove(t).unwrap();
+
+    // Tapped through hole: tap drill 4.2 for M5 plus the thread down the plate.
+    let hole = doc.add(
+        "Hole1",
+        FeatureKind::Hole(HoleFeature {
+            placement: HolePlacement::Face(top_face()),
+            diameter: "1".into(),
+            depth: "3".into(),
+            through: true,
+            head: HoleHead::None,
+            thread: Some("M5".into()),
+        }),
+    );
+    let m = doc.rebuild(&Mock);
+    assert_eq!(*m.status(hole), FeatureStatus::Ok, "{:?}", m.status(hole));
+    let d = &body_descs(&m)[0];
+    assert!(d.contains("thread(") && d.contains("rb=2.060, ra=2.500, p=0.8, -0.80..5.00"), "{d}");
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
 }

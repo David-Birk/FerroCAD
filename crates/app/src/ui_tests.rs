@@ -175,6 +175,7 @@ fn every_command_opens_and_cancels() {
         FeatureType::PressPull,
         FeatureType::Shell,
         FeatureType::Draft,
+        FeatureType::Thread,
         FeatureType::Hole,
         FeatureType::Mirror,
         FeatureType::RectPattern,
@@ -448,6 +449,40 @@ fn screenshots() {
     h.run_steps(15);
     shot(&mut h, "13_holes_on_points");
     press(&mut h, Key::Enter);
+
+    // A threaded M8 shaft on its own.
+    run(&mut h, Command::New);
+    let mut sf = ferrocad_model::SketchFeature::new(ferrocad_model::Plane::XY);
+    sf.sketch.add_circle([0.0, 0.0], 4.0);
+    let s = h.state_mut().doc.add("Sketch1", FeatureKind::Sketch(sf));
+    h.state_mut().doc.add(
+        "Extrude1",
+        FeatureKind::Extrude(ferrocad_model::ExtrudeFeature {
+            sketch: s,
+            profile_point: [0.0, 0.0],
+            distance: "16".into(),
+            symmetric: false,
+            operation: ferrocad_model::Operation::NewBody,
+            distance2: None,
+            taper: "0".into(),
+            extent: ferrocad_model::ExtrudeExtent::Distance,
+            thin: None,
+        }),
+    );
+    h.state_mut().doc.add(
+        "Thread1",
+        FeatureKind::Thread(ferrocad_model::ThreadFeature {
+            face: FaceRef { point: [0.0, -4.0, 14.0], normal: [0.0, -1.0, 0.0] },
+            size: "auto".into(),
+            length: Some("10".into()),
+        }),
+    );
+    h.state_mut().hidden_sketches.insert(s);
+    h.state_mut().rebuild();
+    no_errors(h.state());
+    run(&mut h, Command::Fit);
+    h.run_steps(15);
+    shot(&mut h, "14_thread");
 }
 
 #[test]
@@ -1531,4 +1566,65 @@ fn profiles_and_faces_select_with_a_blue_fill() {
     h.run_steps(2);
     let fill: Vec<[f32; 4]> = h.state().overlay.lock().unwrap().as_chunks::<8>().0.iter().map(|v| [v[3], v[4], v[5], v[6]]).collect();
     assert!(!fill.is_empty() && fill.iter().all(|c| c[2] > c[0]), "blue face fill");
+}
+
+#[test]
+fn thread_on_a_shaft_and_tapped_hole() {
+    let mut h = harness();
+    // M5 shaft, 10 long, standing on the XY plane.
+    let mut sf = ferrocad_model::SketchFeature::new(ferrocad_model::Plane::XY);
+    sf.sketch.add_circle([0.0, 0.0], 2.5);
+    let s = h.state_mut().doc.add("Sketch1", FeatureKind::Sketch(sf));
+    h.state_mut().doc.add(
+        "Extrude1",
+        FeatureKind::Extrude(ferrocad_model::ExtrudeFeature {
+            sketch: s,
+            profile_point: [0.0, 0.0],
+            distance: "10".into(),
+            symmetric: false,
+            operation: ferrocad_model::Operation::NewBody,
+            distance2: None,
+            taper: "0".into(),
+            extent: ferrocad_model::ExtrudeExtent::Distance,
+            thin: None,
+        }),
+    );
+    h.state_mut().hidden_sketches.insert(s);
+    h.state_mut().rebuild();
+    run(&mut h, Command::Home);
+    h.run_steps(15);
+    let v0 = volume(h.state());
+    run(&mut h, Command::Feature(FeatureType::Thread));
+    // The side of the shaft, near its top.
+    click_at(&mut h, [0.0, -2.5, 8.0]);
+    assert!(matches!(&h.state().mode, Mode::Feature(f) if matches!(f.sels[0].picks.as_slice(), [Pick::Face(_)])));
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    let v1 = volume(h.state());
+    assert!(v1 < v0 - 10.0 && v1 > v0 - 40.0, "{v0} → {v1}");
+    let FeatureKind::Thread(t) = &h.state().doc.features().last().unwrap().kind else { panic!() };
+    assert!(t.size == "auto" && t.length.is_none());
+
+    // A tapped M5 through hole in a box: tap drill 4.2 plus the thread.
+    let mut h = harness();
+    box_model(&mut h);
+    let v0 = volume(h.state());
+    h.state_mut().selection = vec![Pick::Face(FaceRef { point: [15.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0] })];
+    run(&mut h, Command::Feature(FeatureType::Hole));
+    if let Mode::Feature(f) = &mut h.state_mut().mode {
+        f.thread = 5; // M5
+        f.flags[0].1 = true; // through all
+    }
+    h.run_steps(2);
+    assert!(h.query_by_label("Diameter").is_none(), "a tapped hole's diameter comes from its size");
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    let drill = std::f64::consts::PI * 2.1 * 2.1 * 10.0;
+    let v1 = volume(h.state());
+    assert!(v1 < v0 - drill - 5.0 && v1 > v0 - drill - 25.0, "{} removed", v0 - v1);
+    let FeatureKind::Hole(hole) = &h.state().doc.features().last().unwrap().kind else { panic!() };
+    assert_eq!(hole.thread.as_deref(), Some("M5"));
+    let id = h.state().doc.features().last().unwrap().id;
+    h.state_mut().edit_feature(id);
+    assert!(matches!(&h.state().mode, Mode::Feature(f) if f.thread == 5));
 }

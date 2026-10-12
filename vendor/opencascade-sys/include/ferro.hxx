@@ -13,11 +13,20 @@
 #include <vector>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepLib.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <Bnd_Box.hxx>
+#include <GCE2d_MakeSegment.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <gp_Lin2d.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -288,6 +297,134 @@ inline std::unique_ptr<TopoDS_Shape> ferro_thin_band(const TopoDS_Shape &face, r
       ferro::fail("thin extrude failed");
     }
     return cut.Shape();
+  });
+}
+
+/// Cylinder data of face `index`: [origin(3), axis(3), radius, v_min, v_max,
+/// outward] where v is the position along the axis from origin and outward
+/// is 1 when the face normal points away from the axis (an outer surface).
+/// Empty if the face is not a cylinder.
+inline rust::Vec<double> ferro_cylinder(const TopoDS_Shape &shape, uint32_t index) {
+  rust::Vec<double> out;
+  try {
+    auto faces = ferro::faces_of(shape);
+    if (index >= faces.size()) {
+      return out;
+    }
+    const TopoDS_Face &f = faces[index];
+    BRepAdaptor_Surface s(f);
+    if (s.GetType() != GeomAbs_Cylinder) {
+      return out;
+    }
+    gp_Cylinder c = s.Cylinder();
+    gp_Ax1 axis = c.Axis();
+    double u = (s.FirstUParameter() + s.LastUParameter()) / 2.0;
+    double v = (s.FirstVParameter() + s.LastVParameter()) / 2.0;
+    gp_Pnt p;
+    gp_Vec du, dv;
+    s.D1(u, v, p, du, dv);
+    gp_Vec n = du.Crossed(dv);
+    if (f.Orientation() == TopAbs_REVERSED) {
+      n.Reverse();
+    }
+    gp_Vec radial(axis.Location(), p);
+    gp_Vec along(axis.Direction());
+    radial -= along * radial.Dot(along);
+    bool outward = n.Dot(radial) > 0.0;
+    // Axial extent from the face's bounding box (V bounds can be infinite).
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(f, box, false, false);
+    double x0, y0, z0, x1, y1, z1;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    double lo = 1e300, hi = -1e300;
+    for (int k = 0; k < 8; ++k) {
+      gp_Pnt q(k & 1 ? x1 : x0, k & 2 ? y1 : y0, k & 4 ? z1 : z0);
+      double t = gp_Vec(axis.Location(), q).Dot(along);
+      lo = std::min(lo, t);
+      hi = std::max(hi, t);
+    }
+    gp_Pnt o = axis.Location();
+    gp_Dir d = axis.Direction();
+    for (double x : {o.X(), o.Y(), o.Z(), d.X(), d.Y(), d.Z(), c.Radius(), lo, hi, outward ? 1.0 : 0.0}) {
+      out.push_back(x);
+    }
+  } catch (const Standard_Failure &) {
+    out.clear();
+  }
+  return out;
+}
+
+/// Axis-aligned bounds of a shape: [xmin, ymin, zmin, xmax, ymax, zmax].
+inline rust::Vec<double> ferro_bounds(const TopoDS_Shape &shape) {
+  rust::Vec<double> out;
+  try {
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(shape, box, false, false);
+    if (box.IsVoid()) {
+      return out;
+    }
+    double x0, y0, z0, x1, y1, z1;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    for (double x : {x0, y0, z0, x1, y1, z1}) {
+      out.push_back(x);
+    }
+  } catch (const Standard_Failure &) {
+    out.clear();
+  }
+  return out;
+}
+
+/// Helical V groove for a thread: p = origin(3), axis(3), base radius,
+/// apex radius, pitch, from, to (axial positions). The 60° triangle has its
+/// base on the base radius (just outside the material) and its apex at the
+/// apex radius; it is swept along a helix on the base radius.
+inline std::unique_ptr<TopoDS_Shape> ferro_thread_groove(rust::Slice<const double> p) {
+  return ferro::guard("thread", [&]() -> TopoDS_Shape {
+    if (p.size() < 11) {
+      ferro::fail("thread needs 11 values");
+    }
+    gp_Pnt o(p[0], p[1], p[2]);
+    gp_Dir d(p[3], p[4], p[5]);
+    double rb = p[6], ra = p[7], pitch = p[8], from = p[9], to = p[10];
+    if (pitch <= 0.0 || to <= from || rb <= 0.0 || ra <= 0.0) {
+      ferro::fail("invalid thread size");
+    }
+    gp_Ax3 ax(o, d);
+    gp_Dir x = ax.XDirection(), y = ax.YDirection();
+    // The helix on the base radius, interpolated through 24 points per turn.
+    double turns = (to - from) / pitch;
+    int n = std::max(8, static_cast<int>(std::ceil(turns * 24.0)));
+    Handle(TColgp_HArray1OfPnt) pts = new TColgp_HArray1OfPnt(1, n + 1);
+    for (int i = 0; i <= n; ++i) {
+      double t = turns * i / n;
+      double a = 2.0 * M_PI * t;
+      gp_XYZ q = o.XYZ() + x.XYZ() * (rb * std::cos(a)) + y.XYZ() * (rb * std::sin(a)) + d.XYZ() * (from + pitch * t);
+      pts->SetValue(i + 1, gp_Pnt(q));
+    }
+    GeomAPI_Interpolate interp(pts, false, 1e-7);
+    interp.Perform();
+    if (!interp.IsDone()) {
+      ferro::fail("could not build the thread helix");
+    }
+    TopoDS_Wire spine = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(interp.Curve()));
+    // 60° flanks: half width = depth · tan 30°.
+    double depth = std::abs(ra - rb);
+    double half = depth * std::tan(M_PI / 6.0);
+    auto at = [&](double r, double h) {
+      return gp_Pnt(o.XYZ() + gp_Vec(x).XYZ() * r + gp_Vec(d).XYZ() * h);
+    };
+    BRepBuilderAPI_MakePolygon tri(at(rb, from - half), at(rb, from + half), at(ra, from), true);
+    BRepOffsetAPI_MakePipeShell mk(spine);
+    mk.SetMode(d); // keep the profile in the axial plane
+    mk.Add(tri.Wire());
+    mk.Build();
+    if (!mk.IsDone()) {
+      ferro::fail("thread sweep failed");
+    }
+    if (!mk.MakeSolid()) {
+      ferro::fail("thread sweep is not closed");
+    }
+    return mk.Shape();
   });
 }
 

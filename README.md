@@ -55,7 +55,8 @@ navigation bar · timeline · status bar with hints for the active tool.
   *all*; one side / two sides / symmetric, flip, taper angle, thin wall inside/outside/centred; joins
   by default on faces), revolve (axis: sketch axis, sketch line, world or construction axis), loft,
   sweep, hole (H; on a face or on sketch points – circle centres, line ends, points – simple /
-  counterbore / countersink), rectangular and circular pattern of bodies or of features (repeat holes,
+  counterbore / countersink, optionally tapped M2–M20 with a modelled thread), **thread** (modelled
+  ISO metric thread on a shaft or bore, size automatic or chosen, full length or a set length), rectangular and circular pattern of bodies or of features (repeat holes,
   cuts, bosses), mirror.
 - **Modify:** press pull (Q) a face, fillet (F), chamfer (equal distance or two distances), draft
   (tilt faces around a neutral plane), shell, combine, split body, move/copy (M), remove (Del),
@@ -175,8 +176,8 @@ vendor/           patched copies of opencascade-rs (OCCT 7.9, crash-safe operati
    highlights and planes are depth-tested.
 4. The solver uses a numeric Jacobian and dense linear algebra – fine for hundreds of unknowns; large
    sketches will need analytic derivatives and a sparse factorisation later.
-5. Components don't have their own origin or timeline yet; contact sets, threads, drawings and sheet
-   metal are still missing.
+5. Components don't have their own origin or timeline yet; contact sets, drawings and sheet metal are
+   still missing. Threads are always modelled (no cosmetic threads).
 
 ## Contributing
 

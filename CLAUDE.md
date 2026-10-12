@@ -141,6 +141,11 @@ Dependency direction: `sketch` ← `model` ← `view`, and `kernel-occt` ← `ap
 - **Holes on sketch points:** `HoleFeature::placement` is `Face(FaceRef)` or `Points { sketch,
   points, flip }`; holes go against the sketch normal. In the UI `SelKind::HolePosition` picks a flat
   face or `Pick::SketchPoint`s.
+- **Threads** (`ThreadFeature`, `HoleFeature::thread`, table in `model/src/thread.rs`): a 60° V
+  groove swept along an interpolated helix (`Kernel::thread_groove`, `BRepOffsetAPI_MakePipeShell`
+  with a fixed binormal) is subtracted. OCCT misses grooves crossing an *existing* bore wall, so
+  tapped holes cut the groove before drilling, and threads on bores plug the bore, cut, re-drill.
+  Cylinder axes from OCCT may point either way: always use `CylinderInfo::from/to`.
 - **Draft** (`DraftFeature`): faces tilted around the neutral plane `pull` (`BRepOffsetAPI_DraftAngle`);
   positive angles narrow the body along the pull direction. Two-distance chamfers are
   `FilletFeature::distance2` → `Kernel::chamfer_two` (first distance on the edge's first adjacent face).
@@ -183,7 +188,7 @@ Dependency direction: `sketch` ← `model` ← `view`, and `kernel-occt` ← `ap
    highlight lines, sketches and outlines are still painter overlays without depth.
 4. Section view has no cap faces (only an outline).
 5. Solver performance: analytic Jacobians and sparse linear algebra for large sketches.
-6. Missing Fusion features: component origins/own timelines, contact sets, threads,
+6. Missing Fusion features: component origins/own timelines, contact sets, cosmetic threads,
    drawings, sheet metal; sketch text is not editable as text after placing it.
 
 ## Conventions

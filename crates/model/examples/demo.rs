@@ -67,7 +67,7 @@ fn main() {
     let boss_top = FaceRef { point: [15.0, 20.0, 22.0], normal: [0.0, 0.0, 1.0] };
     doc.add(
         "Hole1",
-        FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(boss_top), diameter: "6 mm".into(), depth: "0".into(), through: true, head: HoleHead::None }),
+        FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(boss_top), diameter: "6 mm".into(), depth: "0".into(), through: true, head: HoleHead::None, thread: None }),
     );
     doc.add(
         "Hole2",
@@ -77,6 +77,7 @@ fn main() {
             depth: "6 mm".into(),
             through: false,
             head: HoleHead::Countersink { diameter: "8 mm".into(), angle: "90".into() },
+            thread: None,
         }),
     );
     doc.add("Chamfer1", FeatureKind::Fillet(FilletFeature {

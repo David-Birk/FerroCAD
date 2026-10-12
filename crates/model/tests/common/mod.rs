@@ -60,6 +60,21 @@ impl Kernel for Mock {
         Ok(Rc::new(MockSolid { desc, edges: vec![] }))
     }
 
+    fn cylinder(&self, _: &Self::Solid, f: &FaceRef) -> Option<CylinderInfo> {
+        // Tests use a cylinder of radius 2.5 along z through (10, 5), 0..10 high.
+        let outward = f.normal[2].abs() < 1e-9 && (f.normal[0] * (f.point[0] - 10.0) + f.normal[1] * (f.point[1] - 5.0)) > 0.0;
+        Some(CylinderInfo { origin: [10.0, 5.0, 0.0], axis: [0.0, 0.0, 1.0], radius: 2.5, from: 0.0, to: 10.0, outward })
+    }
+
+    fn bounds(&self, _: &Self::Solid) -> Option<(Vec3, Vec3)> {
+        Some(([0.0; 3], [40.0, 20.0, 5.0]))
+    }
+
+    fn thread_groove(&self, o: Vec3, a: Vec3, rb: f64, ra: f64, p: f64, from: f64, to: f64) -> Result<Self::Solid, KernelError> {
+        let desc = format!("thread(o={o:?}, a={a:?}, rb={rb:.3}, ra={ra:.3}, p={p}, {from:.2}..{to:.2})");
+        Ok(Rc::new(MockSolid { desc, edges: vec![] }))
+    }
+
     fn chamfer_two(&self, s: &Self::Solid, e: &[EdgeRef], d1: f64, d2: f64) -> Result<Self::Solid, KernelError> {
         let desc = format!("chamfer2({}, n={}, d1={d1}, d2={d2})", s.desc, e.len());
         Ok(Rc::new(MockSolid { desc, edges: s.edges.clone() }))

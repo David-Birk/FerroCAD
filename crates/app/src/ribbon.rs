@@ -21,6 +21,7 @@ const SOLID_CREATE: &[Entry] = &[
 ];
 const SOLID_CREATE_MORE: &[Entry] = &[
     Entry(Command::Feature(F::Sweep), Icon::Sweep, "Sweep", "Sweep a profile along a sketch path"),
+    Entry(Command::Feature(F::Thread), Icon::Thread, "Thread", "Modelled ISO metric thread on a cylindrical face"),
     Entry(Command::Feature(F::RectPattern), Icon::RectPattern, "Rectangular Pattern", "Copy bodies along one or two directions"),
     Entry(Command::Feature(F::CircPattern), Icon::CircPattern, "Circular Pattern", "Copy bodies around an axis"),
     Entry(Command::Feature(F::Mirror), Icon::Mirror, "Mirror", "Mirror bodies at a plane"),

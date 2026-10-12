@@ -58,7 +58,9 @@ aktiven Werkzeug.
   schräg) oder *Alle*; eine Seite/zwei Seiten/symmetrisch, Flip, Verjüngungswinkel, dünne Wand
   innen/außen/mittig; auf Flächen standardmäßig Vereinigen), Drehung (Achse: Skizzenachse,
   Skizzenlinie, Welt- oder Konstruktionsachse), Loft, Sweep, Bohrung (H; auf einer Fläche oder auf
-  Skizzenpunkten – Kreismittelpunkte, Linienenden, Punkte – einfach/Senkung/Kegelsenkung), Rechteck-
+  Skizzenpunkten – Kreismittelpunkte, Linienenden, Punkte – einfach/Senkung/Kegelsenkung, optional
+  mit Gewinde M2–M20), **Gewinde** (modelliertes metrisches ISO-Gewinde auf Welle oder Bohrung, Größe
+  automatisch oder gewählt, ganze Länge oder fest), Rechteck-
   und Kreismuster von Körpern oder von Features (Bohrungen, Ausschnitte, Aufsätze wiederholen),
   Spiegeln.
 - **Ändern:** Drücken/Ziehen (Q) einer Fläche, Verrundung (F), Fase (gleicher Abstand oder zwei
@@ -182,8 +184,8 @@ vendor/           angepasste Kopien von opencascade-rs (OCCT 7.9, absturzsichere
    Flächen-Hervorhebungen und Ebenen sind tiefengetestet.
 4. Der Solver nutzt eine numerische Jacobimatrix und dichte lineare Algebra – reicht für Hunderte
    Unbekannte; für große Skizzen später analytische Ableitungen und eine Sparse-Zerlegung.
-5. Komponenten haben noch keinen eigenen Ursprung und keine eigene Zeitleiste; Kontaktsätze, Gewinde,
-   Zeichnungen und Blechteile fehlen noch.
+5. Komponenten haben noch keinen eigenen Ursprung und keine eigene Zeitleiste; Kontaktsätze,
+   Zeichnungen und Blechteile fehlen noch. Gewinde sind immer modelliert (keine kosmetischen).
 
 ## Mitmachen
 

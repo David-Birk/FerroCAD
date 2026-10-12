@@ -237,6 +237,14 @@ fn feature_to_json(f: &Feature) -> Json {
                 add("base2", plane_ref_to_json(b2));
             }
         }
+        FeatureKind::Thread(t) => {
+            add("type", "thread".into());
+            add("face", face_to_json(&t.face));
+            add("size", t.size.as_str().into());
+            if let Some(l) = &t.length {
+                add("length", l.as_str().into());
+            }
+        }
         FeatureKind::Draft(d) => {
             add("type", "draft".into());
             add("faces", Json::Arr(d.faces.iter().map(face_to_json).collect()));
@@ -274,6 +282,9 @@ fn feature_to_json(f: &Feature) -> Json {
             add("diameter", h.diameter.as_str().into());
             add("depth", h.depth.as_str().into());
             add("through", h.through.into());
+            if let Some(t) = &h.thread {
+                add("thread", t.as_str().into());
+            }
             match &h.head {
                 HoleHead::None => {}
                 HoleHead::Counterbore { diameter, depth } => add(
@@ -650,6 +661,11 @@ fn feature_from_json(f: &Json) -> R<Feature> {
             angle: str_of(f, "angle")?,
             base2: f.get_opt("base2").map(plane_ref_from).transpose()?,
         }),
+        "thread" => FeatureKind::Thread(ThreadFeature {
+            face: face_from(f.get("face")?)?,
+            size: str_of(f, "size")?,
+            length: f.get_opt("length").map(|l| l.as_str().map(str::to_string)).transpose()?,
+        }),
         "draft" => FeatureKind::Draft(DraftFeature {
             faces: f.get("faces")?.as_arr()?.iter().map(face_from).collect::<R<_>>()?,
             pull: plane_ref_from(f.get("pull")?)?,
@@ -683,6 +699,7 @@ fn feature_from_json(f: &Json) -> R<Feature> {
             diameter: str_of(f, "diameter")?,
             depth: str_of(f, "depth")?,
             through: f.get("through")?.as_bool()?,
+            thread: f.get_opt("thread").map(|t| t.as_str().map(str::to_string)).transpose()?,
             head: match (f.get_opt("counterbore"), f.get_opt("countersink")) {
                 (Some(c), _) => HoleHead::Counterbore { diameter: str_of(c, "diameter")?, depth: str_of(c, "depth")? },
                 (_, Some(c)) => HoleHead::Countersink { diameter: str_of(c, "diameter")?, angle: str_of(c, "angle")? },
