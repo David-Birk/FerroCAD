@@ -1,7 +1,7 @@
 //! Timeline features.
 
 use crate::geom::Plane;
-use crate::kernel::EdgeRef;
+use crate::kernel::{EdgeRef, FaceRef};
 use ferrocad_sketch::{ConstraintId, EntityId, Sketch};
 
 /// Stable id: survives reordering and deleting other features.
@@ -33,10 +33,84 @@ impl Operation {
     }
 }
 
+/// The three planes through the origin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginPlane {
+    XY,
+    XZ,
+    YZ,
+}
+
+impl OriginPlane {
+    pub const ALL: [OriginPlane; 3] = [OriginPlane::XY, OriginPlane::XZ, OriginPlane::YZ];
+
+    pub fn plane(self) -> Plane {
+        match self {
+            OriginPlane::XY => Plane::XY,
+            OriginPlane::XZ => Plane::XZ,
+            OriginPlane::YZ => Plane::YZ,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OriginPlane::XY => "XY",
+            OriginPlane::XZ => "XZ",
+            OriginPlane::YZ => "YZ",
+        }
+    }
+}
+
+/// A plane something is placed on, resolved on every rebuild.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlaneRef {
+    Origin(OriginPlane),
+    /// A flat face of a body (found again by point and normal).
+    Face(FaceRef),
+    /// A construction plane feature.
+    Construction(FeatureId),
+}
+
+/// An axis: a world axis through the origin or a construction axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxisRef {
+    /// 0 = X, 1 = Y, 2 = Z.
+    World(usize),
+    Construction(FeatureId),
+}
+
+impl AxisRef {
+    pub fn label(self) -> String {
+        match self {
+            AxisRef::World(i) => format!("{} axis", ["X", "Y", "Z"][i.min(2)]),
+            AxisRef::Construction(id) => format!("axis #{}", id.0),
+        }
+    }
+}
+
+/// Sketch geometry linked to a body edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Projection {
+    pub edge: EdgeRef,
+    pub entity: EntityId,
+}
+
+/// A sketch profile: the region of `sketch` containing `point`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProfileRef {
+    pub sketch: FeatureId,
+    pub point: [f64; 2],
+}
+
 #[derive(Clone, Debug)]
 pub struct SketchFeature {
+    /// Where the sketch lies. Updated from `attach` on every rebuild.
     pub plane: Plane,
+    /// What the sketch is attached to; `None` keeps `plane` fixed.
+    pub attach: Option<PlaneRef>,
     pub sketch: Sketch,
+    /// Projected body edges that follow the model (see `project.rs`).
+    pub projections: Vec<Projection>,
     /// Dimensions driven by parameter expressions, e.g. `(id, "width / 2")`.
     /// Angle expressions are in degrees.
     pub driven: Vec<(ConstraintId, String)>,
@@ -44,7 +118,7 @@ pub struct SketchFeature {
 
 impl SketchFeature {
     pub fn new(plane: Plane) -> Self {
-        Self { plane, sketch: Sketch::new(), driven: Vec::new() }
+        Self { plane, attach: None, projections: Vec::new(), sketch: Sketch::new(), driven: Vec::new() }
     }
 
     pub fn expression_for(&self, id: ConstraintId) -> Option<&str> {
@@ -81,6 +155,8 @@ pub enum RevolveAxis {
     SketchY,
     /// A line of the sketch (usually a construction line).
     Line(EntityId),
+    /// A world or construction axis.
+    Axis(AxisRef),
 }
 
 #[derive(Clone, Debug)]
@@ -101,12 +177,246 @@ pub struct FilletFeature {
     pub chamfer: bool,
 }
 
+/// Construction plane: `base` rotated by `angle` (degrees) around its own
+/// x axis, then moved by `offset` along its normal.
+#[derive(Clone, Debug)]
+pub struct PlaneFeature {
+    pub base: PlaneRef,
+    pub offset: String,
+    pub angle: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AxisSource {
+    /// Along a straight edge, or the axis of a circular edge.
+    Edge(EdgeRef),
+    /// Normal to a face at a point.
+    FaceNormal(FaceRef),
+}
+
+#[derive(Clone, Debug)]
+pub struct AxisFeature {
+    pub source: AxisSource,
+}
+
+/// Push or pull a face: positive distances add material, negative cut.
+#[derive(Clone, Debug)]
+pub struct PressPullFeature {
+    pub face: FaceRef,
+    pub distance: String,
+}
+
+/// Hollow a body, removing `faces` (open faces), walls `thickness` inwards.
+#[derive(Clone, Debug)]
+pub struct ShellFeature {
+    pub faces: Vec<FaceRef>,
+    pub thickness: String,
+}
+
+/// A round hole drilled into a face at `face.point`.
+#[derive(Clone, Debug)]
+pub struct HoleFeature {
+    pub face: FaceRef,
+    pub diameter: String,
+    pub depth: String,
+    /// Through all instead of `depth`.
+    pub through: bool,
+    pub head: HoleHead,
+}
+
+/// Counterbore or countersink at the top of a hole.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HoleHead {
+    None,
+    Counterbore { diameter: String, depth: String },
+    /// `angle` is the included cone angle in degrees (90° for metric screws).
+    Countersink { diameter: String, angle: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct MirrorFeature {
+    pub bodies: Vec<String>,
+    pub plane: PlaneRef,
+    /// Join the mirror image to the original instead of making new bodies.
+    pub join: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternKind {
+    Rectangular {
+        direction: AxisRef,
+        count: String,
+        spacing: String,
+        /// Optional second direction (count "1" disables it).
+        direction2: AxisRef,
+        count2: String,
+        spacing2: String,
+    },
+    Circular {
+        axis: AxisRef,
+        count: String,
+        /// Total angle in degrees the instances are spread over.
+        angle: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct PatternFeature {
+    pub bodies: Vec<String>,
+    pub kind: PatternKind,
+    /// Join the copies to their original instead of making new bodies.
+    pub join: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CombineOp {
+    Join,
+    Cut,
+    Intersect,
+}
+
+impl CombineOp {
+    pub const ALL: [CombineOp; 3] = [CombineOp::Join, CombineOp::Cut, CombineOp::Intersect];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CombineOp::Join => "Join",
+            CombineOp::Cut => "Cut",
+            CombineOp::Intersect => "Intersect",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CombineFeature {
+    pub target: String,
+    pub tools: Vec<String>,
+    pub op: CombineOp,
+    pub keep_tools: bool,
+}
+
+/// Split a body in two at a plane.
+#[derive(Clone, Debug)]
+pub struct SplitFeature {
+    pub body: String,
+    pub plane: PlaneRef,
+}
+
+/// Translate (x, y, z expressions in mm), then rotate around `axis`.
+#[derive(Clone, Debug)]
+pub struct MoveFeature {
+    pub bodies: Vec<String>,
+    pub translate: [String; 3],
+    pub axis: Option<AxisRef>,
+    /// Degrees.
+    pub angle: String,
+    /// Keep the original and move a copy.
+    pub copy: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct LoftFeature {
+    pub profiles: Vec<ProfileRef>,
+    pub operation: Operation,
+}
+
+#[derive(Clone, Debug)]
+pub struct SweepFeature {
+    pub profile: ProfileRef,
+    /// Connected lines/arcs of `path_sketch` forming the path.
+    pub path_sketch: FeatureId,
+    pub path: Vec<EntityId>,
+    pub operation: Operation,
+}
+
+/// Where a joint attaches on a part.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum JointOrigin {
+    /// The clicked point on a face, z along its normal.
+    Face(FaceRef),
+    /// The centre of a circular edge (axis = z), or the middle of a straight edge.
+    Edge(EdgeRef),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JointKind {
+    Rigid,
+    /// Turns around the joint axis by `angle`.
+    Revolute,
+    /// Slides along the joint axis by `offset`.
+    Slider,
+}
+
+impl JointKind {
+    pub const ALL: [JointKind; 3] = [JointKind::Rigid, JointKind::Revolute, JointKind::Slider];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            JointKind::Rigid => "Rigid",
+            JointKind::Revolute => "Revolute",
+            JointKind::Slider => "Slider",
+        }
+    }
+}
+
+/// Moves `moving` so its joint origin `from` sits on `to` (z axes opposed,
+/// i.e. mated), then turns by `angle` around and shifts by `offset` along
+/// the joint axis.
+#[derive(Clone, Debug)]
+pub struct JointFeature {
+    pub moving: Vec<String>,
+    pub from: JointOrigin,
+    pub to: JointOrigin,
+    pub kind: JointKind,
+    /// Degrees.
+    pub angle: String,
+    pub offset: String,
+    /// Align the z axes instead of opposing them.
+    pub flip: bool,
+}
+
+/// Group bodies into a named component. Features that take bodies (joint,
+/// move, pattern, mirror) accept the component name for all its bodies.
+#[derive(Clone, Debug)]
+pub struct ComponentFeature {
+    pub name: String,
+    pub bodies: Vec<String>,
+}
+
+/// Bodies read from a STEP file (one body per solid).
+#[derive(Clone, Debug)]
+pub struct ImportFeature {
+    pub path: String,
+}
+
+/// Delete bodies from the model at this point of the timeline.
+#[derive(Clone, Debug)]
+pub struct RemoveFeature {
+    pub bodies: Vec<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum FeatureKind {
     Sketch(SketchFeature),
     Extrude(ExtrudeFeature),
     Revolve(RevolveFeature),
     Fillet(FilletFeature),
+    Plane(PlaneFeature),
+    Axis(AxisFeature),
+    PressPull(PressPullFeature),
+    Shell(ShellFeature),
+    Hole(HoleFeature),
+    Mirror(MirrorFeature),
+    Pattern(PatternFeature),
+    Combine(CombineFeature),
+    Split(SplitFeature),
+    Move(MoveFeature),
+    Loft(LoftFeature),
+    Sweep(SweepFeature),
+    Remove(RemoveFeature),
+    Import(ImportFeature),
+    Joint(JointFeature),
+    Component(ComponentFeature),
 }
 
 impl FeatureKind {
@@ -117,15 +427,120 @@ impl FeatureKind {
             FeatureKind::Revolve(_) => "Revolve",
             FeatureKind::Fillet(f) if f.chamfer => "Chamfer",
             FeatureKind::Fillet(_) => "Fillet",
+            FeatureKind::Plane(_) => "Construction plane",
+            FeatureKind::Axis(_) => "Construction axis",
+            FeatureKind::PressPull(_) => "Press Pull",
+            FeatureKind::Shell(_) => "Shell",
+            FeatureKind::Hole(_) => "Hole",
+            FeatureKind::Mirror(_) => "Mirror",
+            FeatureKind::Pattern(p) if matches!(p.kind, PatternKind::Circular { .. }) => "Circular Pattern",
+            FeatureKind::Pattern(_) => "Rectangular Pattern",
+            FeatureKind::Combine(_) => "Combine",
+            FeatureKind::Split(_) => "Split Body",
+            FeatureKind::Move(m) if m.copy => "Copy Body",
+            FeatureKind::Move(_) => "Move Body",
+            FeatureKind::Loft(_) => "Loft",
+            FeatureKind::Sweep(_) => "Sweep",
+            FeatureKind::Remove(_) => "Remove Body",
+            FeatureKind::Import(_) => "Import",
+            FeatureKind::Joint(_) => "Joint",
+            FeatureKind::Component(_) => "Component",
         }
     }
 
-    /// The sketch this feature consumes, if any.
-    pub fn sketch_ref(&self) -> Option<FeatureId> {
+    /// The feature's value expressions with labels (sketch dimensions are
+    /// listed separately via `SketchFeature::driven`).
+    pub fn expressions_mut(&mut self) -> Vec<(&'static str, &mut String)> {
         match self {
-            FeatureKind::Extrude(e) => Some(e.sketch),
-            FeatureKind::Revolve(r) => Some(r.sketch),
-            _ => None,
+            FeatureKind::Sketch(_) | FeatureKind::Axis(_) | FeatureKind::Mirror(_) | FeatureKind::Combine(_) => vec![],
+            FeatureKind::Split(_) | FeatureKind::Loft(_) | FeatureKind::Sweep(_) | FeatureKind::Remove(_) => vec![],
+            FeatureKind::Import(_) => vec![],
+            FeatureKind::Joint(j) => vec![("Angle (°)", &mut j.angle), ("Offset", &mut j.offset)],
+            FeatureKind::Component(_) => vec![],
+            FeatureKind::Extrude(e) => vec![("Distance", &mut e.distance)],
+            FeatureKind::Revolve(r) => vec![("Angle (°)", &mut r.angle)],
+            FeatureKind::Fillet(f) => vec![(if f.chamfer { "Distance" } else { "Radius" }, &mut f.radius)],
+            FeatureKind::Plane(p) => vec![("Offset", &mut p.offset), ("Angle (°)", &mut p.angle)],
+            FeatureKind::PressPull(p) => vec![("Distance", &mut p.distance)],
+            FeatureKind::Shell(sh) => vec![("Thickness", &mut sh.thickness)],
+            FeatureKind::Hole(h) => {
+                let mut v: Vec<(&'static str, &mut String)> = vec![("Diameter", &mut h.diameter)];
+                if !h.through {
+                    v.push(("Depth", &mut h.depth));
+                }
+                match &mut h.head {
+                    HoleHead::None => {}
+                    HoleHead::Counterbore { diameter, depth } => {
+                        v.push(("Counterbore Ø", diameter));
+                        v.push(("Counterbore depth", depth));
+                    }
+                    HoleHead::Countersink { diameter, angle } => {
+                        v.push(("Countersink Ø", diameter));
+                        v.push(("Countersink angle (°)", angle));
+                    }
+                }
+                v
+            }
+            FeatureKind::Pattern(p) => match &mut p.kind {
+                PatternKind::Rectangular { count, spacing, count2, spacing2, .. } => vec![
+                    ("Count", count),
+                    ("Spacing", spacing),
+                    ("Count 2", count2),
+                    ("Spacing 2", spacing2),
+                ],
+                PatternKind::Circular { count, angle, .. } => vec![("Count", count), ("Angle (°)", angle)],
+            },
+            FeatureKind::Move(m) => {
+                let [x, y, z] = &mut m.translate;
+                vec![("X", x), ("Y", y), ("Z", z), ("Angle (°)", &mut m.angle)]
+            }
+        }
+    }
+
+    /// Every feature this one depends on (must come earlier in the timeline).
+    pub fn references(&self) -> Vec<FeatureId> {
+        let plane = |p: &PlaneRef| match p {
+            PlaneRef::Construction(id) => vec![*id],
+            _ => vec![],
+        };
+        let axis = |a: &AxisRef| match a {
+            AxisRef::Construction(id) => vec![*id],
+            _ => vec![],
+        };
+        match self {
+            FeatureKind::Sketch(s) => s.attach.as_ref().map(plane).unwrap_or_default(),
+            FeatureKind::Extrude(e) => vec![e.sketch],
+            FeatureKind::Revolve(r) => match r.axis {
+                RevolveAxis::Axis(AxisRef::Construction(a)) => vec![r.sketch, a],
+                _ => vec![r.sketch],
+            },
+            FeatureKind::Plane(p) => plane(&p.base),
+            FeatureKind::Mirror(m) => plane(&m.plane),
+            FeatureKind::Split(s) => plane(&s.plane),
+            FeatureKind::Pattern(p) => match &p.kind {
+                PatternKind::Rectangular { direction, direction2, .. } => {
+                    [axis(direction), axis(direction2)].concat()
+                }
+                PatternKind::Circular { axis: a, .. } => axis(a),
+            },
+            FeatureKind::Move(m) => m.axis.as_ref().map(axis).unwrap_or_default(),
+            FeatureKind::Loft(l) => l.profiles.iter().map(|p| p.sketch).collect(),
+            FeatureKind::Sweep(s) => vec![s.profile.sketch, s.path_sketch],
+            _ => vec![],
+        }
+    }
+
+    /// The sketches whose profiles this feature consumes.
+    pub fn consumed_sketches(&self) -> Vec<FeatureId> {
+        match self {
+            FeatureKind::Extrude(e) => vec![e.sketch],
+            FeatureKind::Revolve(r) => match r.axis {
+                RevolveAxis::Axis(AxisRef::Construction(a)) => vec![r.sketch, a],
+                _ => vec![r.sketch],
+            },
+            FeatureKind::Loft(l) => l.profiles.iter().map(|p| p.sketch).collect(),
+            FeatureKind::Sweep(s) => vec![s.profile.sketch, s.path_sketch],
+            _ => vec![],
         }
     }
 }

@@ -1,34 +1,34 @@
 # ferrocad
 
-Ein natives, parametrisches CAD für Linux in Rust – Workflow nach dem Vorbild von Fusion 360:
-**Skizze → Bedingungen/Bemaßungen → Extrusion → Verrundung**, alles über eine Zeitleiste und
+Ein natives, parametrisches CAD für Linux in Rust – Workflow und Oberfläche nach dem Vorbild von
+Fusion 360: **Skizze → Bedingungen/Bemaßungen → Körper-Features**, alles über eine Zeitleiste und
 Parameter steuerbar.
 
 ## Architektur
 
 ```
 crates/
-├── sketch/       2D-Constraint-Solver (reines Rust, keine Abhängigkeiten)
-├── model/        Parameter, Ausdrücke, Feature-Timeline, Kernel-Trait
-├── view/         Kamera, Projektion, Picking, Software-Shading (GUI-unabhängig)
+├── sketch/       2D-Constraint-Solver, Regionen/Profile, Skizzen-Operationen (keine Abhängigkeiten)
+├── model/        Parameter, Ausdrücke, Feature-Timeline, Kernel-Trait, .fcad-Format
+├── view/         Kamera, Projektion, Picking, Schnitt (GUI-unabhängig)
 ├── kernel-occt/  Kernel-Implementierung mit OpenCascade (opencascade-rs)
-└── app/          egui/eframe-Oberfläche (wgpu)
+└── app/          egui/eframe-Oberfläche (wgpu mit Tiefenpuffer)
+vendor/           angepasste Kopien von opencascade-rs (OCCT 7.9, absturzsichere Operationen)
 ```
 
-| Crate | Status |
-|---|---|
-| `sketch`, `model`, `view` | getestet (`cargo test -p ferrocad-sketch -p ferrocad-model -p ferrocad-view`, 63 Tests) |
-| `kernel-occt`, `app` | geschrieben gegen die Quellen von opencascade-rs (main) und egui 0.36.2, **noch nie kompiliert** – erster Build auf deinem Rechner |
+Tests: `cargo test --workspace` (Solver, Regionen, Timeline, Dateiformat, echter OCCT-Kernel und
+Oberflächen-Tests, die ganze Arbeitsabläufe per simulierten Klicks durchspielen).
 
 ## Bauen (Arch Linux)
 
 ```sh
-sudo pacman -S --needed rust cmake clang opencascade
+sudo pacman -S --needed cmake clang opencascade   # Rust über rustup, nicht das Paket "rust"
 cargo run --release
+cargo run --release -- teil.fcad                   # Datei direkt öffnen
 ```
 
-`opencascade-rs` verlangt OCCT **7.8 oder neuer innerhalb von 7.x**. Falls Arch schon OCCT 8 ausliefert
-(oder die Systembibliothek nicht gefunden wird), OCCT einmalig aus den Quellen mitbauen (20–40 min):
+`opencascade-rs` verlangt OCCT **7.8 oder neuer innerhalb von 7.x** (Arch liefert 7.9). Ohne
+Systembibliothek lässt sich OCCT einmalig aus den Quellen mitbauen (20–40 min):
 
 ```sh
 cargo run --release --features builtin-occt
@@ -36,40 +36,82 @@ cargo run --release --features builtin-occt
 
 ## Bedienung
 
-- **Navigation:** Rechte Maustaste ziehen = Orbit · Mittlere Maustaste = Pan (Shift+Mitte = Orbit) · Mausrad = Zoom zum Cursor
-- **✏ Sketch** → Ebene wählen → Linie (Polylinie, Esc beendet), Rechteck, Kreis, Bogen (Mitte, Start, Ende)
-  - Punkte rasten auf vorhandene Punkte ein; fast waagerechte/senkrechte Linien bekommen automatisch H/V
-  - Auswählen (Shift = mehrere) → Bedingung oder **↔ Dimension** in der Palette
-  - Bemaßungen akzeptieren Zahlen oder Ausdrücke wie `width / 2`; blau = noch frei, weiß = voll bestimmt
-  - Punkte mit dem Auswahlwerkzeug ziehen
-- **⬆ Extrude** → Skizze wählen, in eine Region klicken → Abstand (Ausdruck), Operation (Neuer Körper/Vereinigen/Schneiden/Schnitt)
-  - Regionen entstehen auch durch sich kreuzende Kurven: eine Linie quer durchs Rechteck ergibt zwei Flächen, zwei überlappende Kreise drei
-- **⟳ Revolve** → Region wählen, Achse (Skizzen-X/Y oder eine Linie der Skizze, z. B. Konstruktionslinie), Winkel in Grad
-- **◔ Fillet / ◢ Chamfer** → Kanten anklicken → Radius
-- **ƒ Parameters** → Parameter ändern, alles baut sich neu auf
-- **Zeitleiste:** Doppelklick = bearbeiten, Rechtsklick = unterdrücken / zurückrollen / verschieben / löschen
-- **File** → Dokumentpfad, Neu / Öffnen / Speichern (`.fcad`, Ctrl+S), STEP- (alle sichtbaren Körper) oder STL-Export
-- **↶ ↷ Undo/Redo** (Ctrl+Z, Ctrl+Shift+Z oder Ctrl+Y) – auch für einzelne Skizzenschritte
+**Oberfläche:** Menüleiste (Datei, Rückgängig/Wiederholen) · Ribbon mit den Bereichen SOLID bzw.
+SKETCH (Erstellen, Ändern, Konstruieren, Prüfen, jede Gruppe mit ▾-Menü) · Browser links · Skizzenpalette
+rechts · ViewCube · Navigationsleiste · Zeitleiste · Statuszeile mit Hinweisen zum aktiven Werkzeug.
+
+**Navigation:** Rechte Maustaste ziehen = Orbit · Mittlere Maustaste = Pan (Shift+Mitte = Orbit) ·
+Mausrad = Zoom zum Cursor · ViewCube: Flächen, Kanten und Ecken anklicken · F6 = Home, Shift+F = Einpassen ·
+Rechtsklick = Kontextmenü passend zur Auswahl.
+
+### Skizzieren
+
+- **Befehlssuche (S):** wie in Fusion – Befehl tippen, Enter führt ihn aus.
+- **Skizze erstellen:** Ursprungsebene, Konstruktionsebene oder eine **ebene Körperfläche** anklicken.
+  Skizzen auf Flächen und Konstruktionsebenen wandern mit, wenn sich das Modell ändert.
+- Werkzeuge: Linie (L), Rechteck (R), Mittelpunkt-Rechteck, Kreis (C), Bogen (A), 3-Punkt-Bogen, Polygon,
+  Langloch, **Spline** (Stützpunkte klicken, Enter/Doppelklick beendet), Projizieren (P) von Körperkanten (lila; Linien, Kreise und Bögen folgen dem Modell).
+- **Werte direkt eintippen:** Nach dem ersten Klick erscheinen Eingabefelder an der Geometrie (Länge/Winkel,
+  Breite/Höhe, Durchmesser) – Wert tippen, **Tab** zum nächsten Feld, **Enter** erzeugt die Form. Getippte
+  Werte werden echte Bemaßungen, auch mit Parametern (`breite / 2`).
+- **Bemaßen (D):** Linie anklicken und platzieren, zweite Linie für Winkel, zwei Punkte (seitlich =
+  vertikal, ober-/unterhalb = horizontal), Kreis/Bogen. Doppelklick auf eine Bemaßung bearbeitet sie.
+- **Bedingungen:** Horizontal, Vertikal, Koinzident, Parallel, Senkrecht, Gleich, Tangential, Konzentrisch,
+  Mittelpunkt, Fixieren – Werkzeug wählen, Geometrie anklicken. Symbole an der Geometrie lassen sich
+  anklicken und mit Entf löschen. Blau = noch frei, weiß = voll bestimmt.
+- Ändern: Trimmen (T), Verlängern, Skizzen-Verrundung, Versatz (O, ganze Kette), Spiegeln (symmetrisch
+  verknüpft), Rechteck- und Kreismuster, Konstruktion (X), Löschen.
+
+### Körper
+
+- **Erstellen:** Extrusion (E, Flip/Symmetrisch, auf Flächen standardmäßig Vereinigen), Drehung (Achse:
+  Skizzenachse, Skizzenlinie, Welt- oder Konstruktionsachse), Loft, Sweep, Bohrung (H, einfach/Senkung/
+  Kegelsenkung), Rechteck- und Kreismuster, Spiegeln.
+- **Ändern:** Drücken/Ziehen (Q) einer Fläche, Verrundung (F), Fase, Wandstärke (Shell), Kombinieren,
+  Körper teilen, Verschieben/Kopieren (M), Entfernen (Entf), Parameter (Benutzer- und
+  Modellparameter: alle Bemaßungen und Feature-Werte in einer Tabelle).
+- **Konstruieren:** Versatz-/Winkelebene, Achse durch Kante, Achse senkrecht zur Fläche.
+- **Montieren:** Komponente aus ausgewählten Körpern (eigener Browser-Ordner; ein Klick auf einen
+  ihrer Körper wählt die ganze Komponente, Gelenke/Verschieben/Muster bewegen sie gemeinsam).
+  Gelenk (Joint) – Körper an eine runde Kante oder Flächenstelle eines anderen setzen,
+  starr, als Drehgelenk oder Schiebegelenk; Winkel/Versatz sind Parameter. Rechtsklick in der Zeitleiste →
+  *Animieren* bewegt das Gelenk (Esc beendet). Interferenzprüfung zeigt Überschneidungen rot.
+- **Prüfen:** Messen (I: Punkte, Kanten, Durchmesser), Schnittansicht, Eigenschaften (Material, Masse,
+  Volumen, Oberfläche, Schwerpunkt).
+- **Aussehen:** Rechtsklick auf einen Körper im Browser → *Appearance* (Stahl, Aluminium, Messing, Kunststoffe,
+  Holz …); die Dichte des Materials ergibt die Masse.
+- **Ziehpfeile:** Extrusion und Drücken/Ziehen haben einen Pfeil im Modell, an dem man den Abstand zieht.
+- Extrusion, Drehung, Verrundung und alle Dialoge mit Auswahl zeigen eine **Live-Vorschau**.
+  Enter = OK, Esc = Abbrechen.
+- Auswahl im Modell: Flächen und Kanten anklicken (Shift = mehrere), Körper im Browser. Ein passender
+  Befehl übernimmt die Auswahl.
+
+### Zeitleiste, Dateien
+
+- **Zeitleiste:** Doppelklick = bearbeiten, Rechtsklick = unterdrücken / zurückrollen / verschieben /
+  löschen, orangen Marker ziehen zum Zurückrollen.
+- **Datei:** Neu, Öffnen…, Speichern (Ctrl+S), Speichern unter…, **STEP-Import** (ein Körper je Solid,
+  als Feature in der Zeitleiste), STEP- und STL-Export – mit nativen Dateidialogen (XDG-Portal).
+- **Rückgängig/Wiederholen:** Ctrl+Z, Ctrl+Shift+Z oder Ctrl+Y – auch einzelne Skizzenschritte.
 
 ## Dateiformat `.fcad`
 
 Lesbares JSON: Parameter, Skizzen (Punkte, Kurven, Bedingungen, parametrische Bemaßungen) und die
 Feature-Zeitleiste. Körper werden beim Laden neu berechnet, wie bei Fusion. Dateien lassen sich gut mit
-git versionieren; beschädigte Dateien liefern eine Fehlermeldung statt eines Absturzes.
+git versionieren; beschädigte Dateien liefern eine Fehlermeldung statt eines Absturzes. Ausgeblendete
+Körper, Skizzen und Konstruktionselemente werden mitgespeichert.
 
-## Bekannte Grenzen und nächste Schritte
+## Bekannte Grenzen
 
-1. **Fillet-Absturz:** opencascade-rs prüft `IsDone()` nicht; ein zu großer Radius wirft eine C++-Exception
-   und beendet das Programm. Lösung: kleiner Upstream-PR (oder Fork), der `Result` zurückgibt.
-2. **Topologisches Benennungsproblem:** Kanten für Fillets werden über ihren Mittelpunkt wiedergefunden
-   (Toleranz 1 mm). Große Parameteränderungen verlieren die Auswahl → Fehler in der Zeitleiste, Kanten neu wählen.
-3. **Regionen:** Kreuzungen werden aufgelöst; überlappende *kollineare* Linien (zwei Linien übereinander, aber
-   unterschiedlich lang) werden noch nicht zusammengeführt.
-4. **Rendering:** Painter-Algorithmus über egui (keine echte Tiefenpufferung). Gut für einfache Teile; nächster
-   Schritt ist ein `egui_wgpu`-Paint-Callback mit Depth-Buffer.
-5. Skizzen nur auf den Ursprungsebenen – Skizzieren auf Körperflächen, Muster, Spiegeln und Baugruppen fehlen noch.
-   Revolve-Profile dürfen die Achse nicht schneiden (sonst meldet OCCT einen ungültigen Körper).
-6. Der Solver nutzt eine numerische Jacobimatrix und dichte lineare Algebra – reicht für Hunderte Unbekannte;
-   für große Skizzen später analytische Ableitungen und eine Sparse-Zerlegung.
+1. **Topologisches Benennungsproblem:** Kanten werden über ihren Mittelpunkt (Toleranz 1 mm), Flächen über
+   Punkt + Normale wiedergefunden. Große Änderungen können eine Auswahl verlieren → Fehler in der
+   Zeitleiste, Kanten/Flächen neu wählen.
+2. Geschlossene Splines lassen sich noch nicht trimmen; überlappende *kollineare* Linien werden in Regionen nicht
+   zusammengeführt. Revolve-Profile dürfen die Achse nicht schneiden.
+3. Konstruktionsebenen und Auswahl-Hervorhebungen werden über die Körper gezeichnet (ohne Tiefentest).
+4. Der Solver nutzt eine numerische Jacobimatrix und dichte lineare Algebra – reicht für Hunderte
+   Unbekannte; für große Skizzen später analytische Ableitungen und eine Sparse-Zerlegung.
+5. Komponenten haben noch keinen eigenen Ursprung und keine eigene Zeitleiste; Gelenkgrenzen, Gewinde,
+   Zeichnungen und Blechteile fehlen noch.
 
 Lizenz: GPL-3.0-or-later (opencascade-rs/OCCT sind LGPL-2.1).

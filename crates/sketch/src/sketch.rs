@@ -26,6 +26,8 @@ pub enum Entity {
     /// Runs counter-clockwise from `start` to `end`. Its radius is implicit:
     /// the solver keeps `|end - center| == |start - center|`.
     Arc { center: PointId, start: PointId, end: PointId },
+    /// Smooth curve through its fit points (centripetal Catmull–Rom).
+    Spline { points: Vec<PointId> },
 }
 
 impl Entity {
@@ -34,8 +36,59 @@ impl Entity {
             Entity::Line { a, b } => vec![a, b],
             Entity::Circle { center, .. } => vec![center],
             Entity::Arc { center, start, end } => vec![center, start, end],
+            Entity::Spline { ref points } => points.clone(),
         }
     }
+}
+
+/// Points along a centripetal Catmull–Rom spline through `fit`, `per_span`
+/// samples per span, including both ends.
+pub fn spline_samples(fit: &[[f64; 2]], per_span: usize) -> Vec<[f64; 2]> {
+    let n = fit.len();
+    if n < 2 {
+        return fit.to_vec();
+    }
+    let closed = n > 3 && dist(fit[0], fit[n - 1]) < 1e-9;
+    let get = |i: isize| -> [f64; 2] {
+        if closed {
+            let m = (n - 1) as isize;
+            fit[i.rem_euclid(m) as usize]
+        } else if i < 0 {
+            // Reflect the first point to make a phantom start.
+            [2.0 * fit[0][0] - fit[1][0], 2.0 * fit[0][1] - fit[1][1]]
+        } else if i as usize >= n {
+            [2.0 * fit[n - 1][0] - fit[n - 2][0], 2.0 * fit[n - 1][1] - fit[n - 2][1]]
+        } else {
+            fit[i as usize]
+        }
+    };
+    let mut out = vec![fit[0]];
+    for i in 0..(n - 1) as isize {
+        let (p0, p1, p2, p3) = (get(i - 1), get(i), get(i + 1), get(i + 2));
+        let knot = |a: [f64; 2], b: [f64; 2]| dist(a, b).sqrt().max(1e-9);
+        let t0 = 0.0;
+        let t1 = t0 + knot(p0, p1);
+        let t2 = t1 + knot(p1, p2);
+        let t3 = t2 + knot(p2, p3);
+        for k in 1..=per_span {
+            let t = t1 + (t2 - t1) * k as f64 / per_span as f64;
+            let lerp = |a: [f64; 2], b: [f64; 2], ta: f64, tb: f64| {
+                let w = (t - ta) / (tb - ta);
+                [a[0] + (b[0] - a[0]) * w, a[1] + (b[1] - a[1]) * w]
+            };
+            let a1 = lerp(p0, p1, t0, t1);
+            let a2 = lerp(p1, p2, t1, t2);
+            let a3 = lerp(p2, p3, t2, t3);
+            let b1 = lerp(a1, a2, t0, t2);
+            let b2 = lerp(a2, a3, t1, t3);
+            out.push(lerp(b1, b2, t1, t2));
+        }
+    }
+    if closed {
+        let last = out.len() - 1;
+        out[last] = out[0];
+    }
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +168,11 @@ impl Sketch {
         self.fixed[p.y.0] = fixed;
     }
 
+    /// Fix or free a single parameter (e.g. a projected circle's radius).
+    pub fn set_param_fixed(&mut self, id: ParamId, fixed: bool) {
+        self.fixed[id.0] = fixed;
+    }
+
     pub fn is_point_fixed(&self, id: PointId) -> bool {
         let p = self.points[id.0];
         self.fixed[p.x.0] && self.fixed[p.y.0]
@@ -139,6 +197,28 @@ impl Sketch {
         let a = self.add_point(a);
         let b = self.add_point(b);
         self.add_line_between(a, b)
+    }
+
+    /// Spline through fit points (at least two).
+    pub fn add_spline(&mut self, fit: &[[f64; 2]]) -> EntityId {
+        let points = fit.iter().map(|p| self.add_point(*p)).collect();
+        self.push_entity(Entity::Spline { points })
+    }
+
+    /// Spline through existing points (shared with other curves).
+    pub fn add_spline_through(&mut self, points: Vec<PointId>) -> EntityId {
+        self.push_entity(Entity::Spline { points })
+    }
+
+    /// Sample points of a spline entity.
+    pub fn spline_points(&self, id: EntityId, per_span: usize) -> Vec<[f64; 2]> {
+        match self.entity(id) {
+            Entity::Spline { points } => {
+                let fit: Vec<[f64; 2]> = points.iter().map(|p| self.point_pos(*p)).collect();
+                spline_samples(&fit, per_span)
+            }
+            _ => Vec::new(),
+        }
     }
 
     pub fn add_circle(&mut self, center: [f64; 2], radius: f64) -> EntityId {
@@ -234,7 +314,7 @@ impl Sketch {
             Entity::Arc { center, start, .. } => {
                 Some(dist(self.point_pos(center), self.point_pos(start)))
             }
-            Entity::Line { .. } => None,
+            Entity::Line { .. } | Entity::Spline { .. } => None,
         }
     }
 
@@ -300,7 +380,7 @@ impl Sketch {
                 let c = self.pt(p, center);
                 Some((c, dist(c, self.pt(p, start))))
             }
-            Entity::Line { .. } => None,
+            Entity::Line { .. } | Entity::Spline { .. } => None,
         }
     }
 }

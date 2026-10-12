@@ -180,7 +180,7 @@ pub fn shade_mesh(mesh: &TriMesh, cam: &Camera, vp: &Viewport, base: [u8; 3]) ->
     let eye = cam.eye();
     let projected: Vec<Option<[f64; 3]>> = mesh.positions.iter().map(|p| cam.project(*p, vp)).collect();
     let mut out = Vec::with_capacity(mesh.indices.len() / 3);
-    for tri in mesh.indices.chunks_exact(3) {
+    for tri in mesh.indices.as_chunks::<3>().0 {
         let [i, j, k] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
         let (Some(a), Some(b), Some(c)) = (projected[i], projected[j], projected[k]) else {
             continue;
@@ -249,9 +249,258 @@ pub fn bounds<'a>(meshes: impl IntoIterator<Item = &'a TriMesh>) -> Option<(Vec3
     any.then_some((min, max))
 }
 
+fn triangle(mesh: &TriMesh, tri: usize) -> [Vec3; 3] {
+    let i = &mesh.indices[tri * 3..tri * 3 + 3];
+    [mesh.positions[i[0] as usize], mesh.positions[i[1] as usize], mesh.positions[i[2] as usize]]
+}
+
+/// Nearest triangle hit by a ray (both sides count): (triangle index, distance
+/// along the normalised direction).
+pub fn ray_mesh(mesh: &TriMesh, origin: Vec3, dir: Vec3) -> Option<(usize, f64)> {
+    let dir = normalize(dir);
+    let mut best: Option<(usize, f64)> = None;
+    for tri in 0..mesh.indices.len() / 3 {
+        let [a, b, c] = triangle(mesh, tri);
+        // Möller–Trumbore
+        let (e1, e2) = (sub(b, a), sub(c, a));
+        let p = cross(dir, e2);
+        let det = dot(e1, p);
+        if det.abs() < 1e-12 {
+            continue;
+        }
+        let inv = 1.0 / det;
+        let s = sub(origin, a);
+        let u = dot(s, p) * inv;
+        if !(0.0..=1.0).contains(&u) {
+            continue;
+        }
+        let q = cross(s, e1);
+        let v = dot(dir, q) * inv;
+        if v < 0.0 || u + v > 1.0 {
+            continue;
+        }
+        let t = dot(e2, q) * inv;
+        if t > 1e-9 && best.is_none_or(|(_, bt)| t < bt) {
+            best = Some((tri, t));
+        }
+    }
+    best
+}
+
+/// A flat face picked on a mesh.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FacePick {
+    /// Hit point on the face.
+    pub point: Vec3,
+    /// Unit normal pointing towards the ray origin (out of the body).
+    pub normal: Vec3,
+    /// Every triangle of the mesh lying in the same plane.
+    pub triangles: Vec<usize>,
+    /// Distance along the ray.
+    pub t: f64,
+}
+
+/// Pick the face under a ray. Returns `None` if nothing is hit or the hit
+/// face is curved (its vertex normals disagree with the triangle normal).
+pub fn pick_planar_face(mesh: &TriMesh, origin: Vec3, dir: Vec3) -> Option<FacePick> {
+    let dir = normalize(dir);
+    let (tri, t) = ray_mesh(mesh, origin, dir)?;
+    let [a, b, c] = triangle(mesh, tri);
+    let mut normal = normalize(cross(sub(b, a), sub(c, a)));
+    if dot(normal, dir) > 0.0 {
+        normal = scale(normal, -1.0);
+    }
+    if mesh.normals.len() == mesh.positions.len() {
+        let flat = mesh.indices[tri * 3..tri * 3 + 3]
+            .iter()
+            .all(|&i| dot(normalize(mesh.normals[i as usize]), normal).abs() > 0.999);
+        if !flat {
+            return None;
+        }
+    }
+    let point = add(origin, scale(dir, t));
+    let tolerance = 1e-4 * (1.0 + length3(point));
+    let triangles = (0..mesh.indices.len() / 3)
+        .filter(|&k| {
+            let [p, q, r] = triangle(mesh, k);
+            let n = cross(sub(q, p), sub(r, p));
+            let len = (dot(n, n)).sqrt();
+            len > 1e-12
+                && dot(scale(n, 1.0 / len), normal).abs() > 0.9999
+                && [p, q, r].iter().all(|v| dot(sub(*v, point), normal).abs() < tolerance)
+        })
+        .collect();
+    Some(FacePick { point, normal, triangles, t })
+}
+
+/// All triangles connected to `tri` through shared vertex indices. OCCT
+/// meshes every face with its own vertices, so this is exactly the B-rep
+/// face the triangle belongs to.
+pub fn face_component(mesh: &TriMesh, tri: usize) -> Vec<usize> {
+    let n = mesh.indices.len() / 3;
+    let mut by_vertex: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+    for t in 0..n {
+        for &i in &mesh.indices[t * 3..t * 3 + 3] {
+            by_vertex.entry(i).or_default().push(t);
+        }
+    }
+    let mut seen = vec![false; n];
+    let mut stack = vec![tri];
+    let mut out = Vec::new();
+    while let Some(t) = stack.pop() {
+        if t >= n || seen[t] {
+            continue;
+        }
+        seen[t] = true;
+        out.push(t);
+        for &i in &mesh.indices[t * 3..t * 3 + 3] {
+            stack.extend(by_vertex[&i].iter().copied().filter(|&u| !seen[u]));
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// Clip a mesh to the half space `dot(p - origin, normal) <= 0` (section
+/// view). Returns the clipped mesh and the cut outline as segments.
+pub fn clip_mesh(mesh: &TriMesh, origin: Vec3, normal: Vec3) -> (TriMesh, Vec<[Vec3; 2]>) {
+    let side = |p: Vec3| dot(sub(p, origin), normal);
+    let mut out = TriMesh::default();
+    let mut outline = Vec::new();
+    let has_normals = mesh.normals.len() == mesh.positions.len();
+    for tri in mesh.indices.as_chunks::<3>().0 {
+        let vs: Vec<(Vec3, Vec3)> = tri
+            .iter()
+            .map(|&i| {
+                let i = i as usize;
+                (mesh.positions[i], if has_normals { mesh.normals[i] } else { [0.0, 0.0, 1.0] })
+            })
+            .collect();
+        let d: Vec<f64> = vs.iter().map(|v| side(v.0)).collect();
+        if d.iter().all(|x| *x <= 0.0) {
+            let base = out.positions.len() as u32;
+            for (p, n) in &vs {
+                out.positions.push(*p);
+                out.normals.push(*n);
+            }
+            out.indices.extend([base, base + 1, base + 2]);
+            continue;
+        }
+        if d.iter().all(|x| *x > 0.0) {
+            continue;
+        }
+        // Sutherland–Hodgman against one plane.
+        let mut poly: Vec<(Vec3, Vec3)> = Vec::new();
+        let mut cut: Vec<Vec3> = Vec::new();
+        for k in 0..3 {
+            let (a, b) = (vs[k], vs[(k + 1) % 3]);
+            let (da, db) = (d[k], d[(k + 1) % 3]);
+            if da <= 0.0 {
+                poly.push(a);
+            }
+            if (da <= 0.0) != (db <= 0.0) {
+                let t = da / (da - db);
+                let p = add(a.0, scale(sub(b.0, a.0), t));
+                let n = add(a.1, scale(sub(b.1, a.1), t));
+                poly.push((p, n));
+                cut.push(p);
+            }
+        }
+        if cut.len() == 2 {
+            outline.push([cut[0], cut[1]]);
+        }
+        let base = out.positions.len() as u32;
+        for (p, n) in &poly {
+            out.positions.push(*p);
+            out.normals.push(*n);
+        }
+        for k in 1..poly.len().saturating_sub(1) as u32 {
+            out.indices.extend([base, base + k, base + k + 1]);
+        }
+    }
+    (out, outline)
+}
+
+fn length3(v: Vec3) -> f64 {
+    dot(v, v).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn face_component_follows_shared_vertices() {
+        let m = quad_mesh();
+        assert_eq!(face_component(&m, 0), vec![0, 1]);
+        assert_eq!(face_component(&m, 2), vec![2]);
+    }
+
+    #[test]
+    fn clipping_keeps_the_negative_side() {
+        let m = quad_mesh();
+        // Cut the square at x = 1: half of it stays, the x = 5 triangle goes.
+        let (c, outline) = clip_mesh(&m, [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        let area: f64 = c
+            .indices
+            .as_chunks::<3>().0.iter()
+            .map(|t| {
+                let [a, b, d] = [0, 1, 2].map(|k| c.positions[t[k] as usize]);
+                0.5 * length3(cross(sub(b, a), sub(d, a)))
+            })
+            .sum();
+        assert!((area - 2.0).abs() < 1e-9, "{area}");
+        assert!(c.positions.iter().all(|p| p[0] <= 1.0 + 1e-12));
+        assert_eq!(outline.len(), 2);
+    }
+
+    fn quad_mesh() -> TriMesh {
+        // Two triangles forming the square z = 1, x,y in [0, 2], plus one
+        // triangle in the plane x = 5.
+        TriMesh {
+            positions: vec![
+                [0.0, 0.0, 1.0],
+                [2.0, 0.0, 1.0],
+                [2.0, 2.0, 1.0],
+                [0.0, 2.0, 1.0],
+                [5.0, 0.0, 0.0],
+                [5.0, 1.0, 0.0],
+                [5.0, 0.0, 1.0],
+            ],
+            normals: vec![],
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6],
+        }
+    }
+
+    #[test]
+    fn ray_hits_nearest_triangle() {
+        let m = quad_mesh();
+        let (tri, t) = ray_mesh(&m, [0.5, 1.5, 10.0], [0.0, 0.0, -2.0]).unwrap();
+        assert_eq!(tri, 1);
+        assert!((t - 9.0).abs() < 1e-9);
+        assert!(ray_mesh(&m, [3.0, 3.0, 10.0], [0.0, 0.0, -1.0]).is_none());
+    }
+
+    #[test]
+    fn planar_face_collects_coplanar_triangles() {
+        let m = quad_mesh();
+        let f = pick_planar_face(&m, [1.5, 0.5, 4.0], [0.0, 0.0, -1.0]).unwrap();
+        assert_eq!(f.triangles, vec![0, 1]);
+        assert!((f.normal[2] - 1.0).abs() < 1e-12, "normal faces the viewer");
+        assert!((f.point[2] - 1.0).abs() < 1e-12);
+        // From below the normal flips towards the ray origin.
+        let g = pick_planar_face(&m, [1.5, 0.5, -4.0], [0.0, 0.0, 1.0]).unwrap();
+        assert!((g.normal[2] + 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn curved_face_is_rejected() {
+        let mut m = quad_mesh();
+        m.normals = vec![[0.0, 0.0, 1.0]; 7];
+        m.normals[2] = normalize([0.3, 0.0, 1.0]);
+        assert!(pick_planar_face(&m, [1.5, 0.5, 4.0], [0.0, 0.0, -1.0]).is_none());
+        assert!(pick_planar_face(&m, [0.2, 1.5, 4.0], [0.0, 0.0, -1.0]).is_none(), "shares vertex 2");
+    }
 
     fn vp() -> Viewport {
         Viewport { x: 0.0, y: 0.0, width: 800.0, height: 600.0 }

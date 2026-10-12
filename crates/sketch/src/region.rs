@@ -19,7 +19,8 @@ use std::f64::consts::TAU;
 
 #[derive(Clone, Copy, Debug)]
 enum Curve {
-    Line { a: [f64; 2], b: [f64; 2] },
+    /// `spline` tags pieces of a sketch spline so loops can merge them back.
+    Line { a: [f64; 2], b: [f64; 2], spline: Option<u32> },
     /// Counter-clockwise from angle `a0` by `sweep` (0 < sweep ≤ 2π).
     Arc { c: [f64; 2], r: f64, a0: f64, sweep: f64 },
 }
@@ -31,7 +32,7 @@ impl Curve {
 
     fn point(&self, s: f64) -> [f64; 2] {
         match *self {
-            Curve::Line { a, b } => [a[0] + s * (b[0] - a[0]), a[1] + s * (b[1] - a[1])],
+            Curve::Line { a, b, .. } => [a[0] + s * (b[0] - a[0]), a[1] + s * (b[1] - a[1])],
             Curve::Arc { c, r, a0, sweep } => {
                 let t = a0 + s * sweep;
                 [c[0] + r * t.cos(), c[1] + r * t.sin()]
@@ -41,7 +42,7 @@ impl Curve {
 
     fn length(&self) -> f64 {
         match *self {
-            Curve::Line { a, b } => dist(a, b),
+            Curve::Line { a, b, .. } => dist(a, b),
             Curve::Arc { r, sweep, .. } => r * sweep,
         }
     }
@@ -59,7 +60,7 @@ impl Curve {
     /// Sub-curve between parameters `s0 < s1`.
     fn piece(&self, s0: f64, s1: f64) -> Curve {
         match *self {
-            Curve::Line { .. } => Curve::Line { a: self.point(s0), b: self.point(s1) },
+            Curve::Line { spline, .. } => Curve::Line { a: self.point(s0), b: self.point(s1), spline },
             Curve::Arc { c, r, a0, sweep } => {
                 Curve::Arc { c, r, a0: a0 + s0 * sweep, sweep: (s1 - s0) * sweep }
             }
@@ -68,7 +69,7 @@ impl Curve {
 
     fn segment(&self) -> Segment {
         match *self {
-            Curve::Line { a, b } => Segment::Line { a, b },
+            Curve::Line { a, b, .. } => Segment::Line { a, b },
             Curve::Arc { c, r, .. } if self.closed() => Segment::Circle { center: c, radius: r, ccw: true },
             Curve::Arc { c, .. } => Segment::Arc { center: c, from: self.point(0.0), to: self.point(1.0), ccw: true },
         }
@@ -90,7 +91,7 @@ fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
 /// Intersection parameters (on `p`, on `q`). `tol` is a length.
 fn intersect(p: &Curve, q: &Curve, tol: f64) -> Vec<(f64, f64)> {
     match (*p, *q) {
-        (Curve::Line { a, b }, Curve::Line { a: c, b: d }) => {
+        (Curve::Line { a, b, .. }, Curve::Line { a: c, b: d, .. }) => {
             let (d1, d2) = (sub(b, a), sub(d, c));
             let den = cross(d1, d2);
             let (l1, l2) = (dist(a, b), dist(c, d));
@@ -135,7 +136,7 @@ fn intersect(p: &Curve, q: &Curve, tol: f64) -> Vec<(f64, f64)> {
 }
 
 fn line_arc(l: &Curve, arc: &Curve, tol: f64) -> Vec<(f64, f64)> {
-    let (Curve::Line { a, b }, Curve::Arc { c, r, a0, sweep }) = (*l, *arc) else { return vec![] };
+    let (Curve::Line { a, b, .. }, Curve::Arc { c, r, a0, sweep }) = (*l, *arc) else { return vec![] };
     let d = sub(b, a);
     let f = sub(a, c);
     let qa = d[0] * d[0] + d[1] * d[1];
@@ -175,7 +176,15 @@ fn collect_curves(sk: &Sketch) -> Vec<Curve> {
             Entity::Line { a, b } => {
                 let (a, b) = (sk.point_pos(a), sk.point_pos(b));
                 if dist(a, b) > 0.0 {
-                    out.push(Curve::Line { a, b });
+                    out.push(Curve::Line { a, b, spline: None });
+                }
+            }
+            Entity::Spline { .. } => {
+                let pts = sk.spline_points(id, 12);
+                for w in pts.windows(2) {
+                    if dist(w[0], w[1]) > 0.0 {
+                        out.push(Curve::Line { a: w[0], b: w[1], spline: Some(id.0 as u32) });
+                    }
                 }
             }
             Entity::Circle { center, radius } => {
@@ -322,20 +331,21 @@ pub fn regions(sk: &Sketch) -> Vec<Profile> {
     }
 
     // ---- 4. half-edges: 2i = u→v along the curve, 2i+1 = reverse
-    let half_segment = |h: usize| -> Segment {
-        let seg = edges[h / 2].curve.segment();
-        if h % 2 == 0 {
-            seg
-        } else {
-            seg.reversed()
-        }
+    let half_segment = |h: usize| -> (Segment, Option<u32>) {
+        let curve = &edges[h / 2].curve;
+        let seg = curve.segment();
+        let tag = match *curve {
+            Curve::Line { spline, .. } => spline,
+            _ => None,
+        };
+        (if h.is_multiple_of(2) { seg } else { seg.reversed() }, tag)
     };
-    let half_from = |h: usize| if h % 2 == 0 { edges[h / 2].u } else { edges[h / 2].v };
+    let half_from = |h: usize| if h.is_multiple_of(2) { edges[h / 2].u } else { edges[h / 2].v };
     // Leaving direction, measured slightly along the curve so tangent ties
     // (a line and an arc leaving in the same direction) resolve correctly.
     let half_angle = |h: usize| -> f64 {
         let c = &edges[h / 2].curve;
-        let (p0, p1) = if h % 2 == 0 { (c.point(0.0), c.point(1e-4)) } else { (c.point(1.0), c.point(1.0 - 1e-4)) };
+        let (p0, p1) = if h.is_multiple_of(2) { (c.point(0.0), c.point(1e-4)) } else { (c.point(1.0), c.point(1.0 - 1e-4)) };
         (p1[1] - p0[1]).atan2(p1[0] - p0[0])
     };
     let mut outgoing: Vec<Vec<(f64, usize)>> = vec![Vec::new(); nv];
@@ -370,7 +380,7 @@ pub fn regions(sk: &Sketch) -> Vec<Profile> {
             h = next(h);
             guard += 1;
         }
-        let lp = Loop { segments: segs };
+        let lp = Loop { segments: merge_spline_pieces(segs) };
         let anchor = half_from(start);
         let area = lp.signed_area();
         if area > tol * tol {
@@ -413,6 +423,40 @@ pub fn regions(sk: &Sketch) -> Vec<Profile> {
         .zip(holes)
         .map(|((outer, _), holes)| Profile { outer, holes })
         .collect()
+}
+
+/// Merge consecutive pieces of the same spline into one spline segment
+/// (also across the loop's start).
+fn merge_spline_pieces(mut segs: Vec<(Segment, Option<u32>)>) -> Vec<Segment> {
+    if segs.len() > 1 {
+        // Rotate so the loop does not start in the middle of a spline run.
+        let n = segs.len();
+        if let Some(k) = (0..n).find(|&k| segs[k].1.is_none() || segs[k].1 != segs[(k + n - 1) % n].1) {
+            segs.rotate_left(k);
+        }
+    }
+    let mut out: Vec<Segment> = Vec::new();
+    let mut run: Option<(u32, Vec<[f64; 2]>)> = None;
+    let flush = |run: &mut Option<(u32, Vec<[f64; 2]>)>, out: &mut Vec<Segment>| {
+        if let Some((_, points)) = run.take() {
+            out.push(if points.len() == 2 { Segment::Line { a: points[0], b: points[1] } } else { Segment::Spline { points } });
+        }
+    };
+    for (seg, tag) in segs {
+        match (tag, &mut run) {
+            (Some(t), Some((rt, pts))) if *rt == t => pts.push(seg.end()),
+            (Some(t), _) => {
+                flush(&mut run, &mut out);
+                run = Some((t, vec![seg.start(), seg.end()]));
+            }
+            (None, _) => {
+                flush(&mut run, &mut out);
+                out.push(seg);
+            }
+        }
+    }
+    flush(&mut run, &mut out);
+    out
 }
 
 struct UnionFind {

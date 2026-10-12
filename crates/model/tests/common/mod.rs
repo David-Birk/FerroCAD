@@ -50,6 +50,53 @@ impl Kernel for Mock {
         Ok(Rc::new(MockSolid { desc, edges: s.edges.clone() }))
     }
 
+    fn extrude_face(&self, s: &Self::Solid, f: &FaceRef, d: f64) -> Result<Self::Solid, KernelError> {
+        let desc = format!("face({}, n={:?}, d={d})", s.desc, f.normal);
+        Ok(Rc::new(MockSolid { desc, edges: vec![] }))
+    }
+
+    fn shell(&self, s: &Self::Solid, faces: &[FaceRef], t: f64) -> Result<Self::Solid, KernelError> {
+        let desc = format!("shell({}, n={}, t={t})", s.desc, faces.len());
+        Ok(Rc::new(MockSolid { desc, edges: s.edges.clone() }))
+    }
+
+    fn transform(&self, s: &Self::Solid, t: &Transform) -> Result<Self::Solid, KernelError> {
+        let t = match t {
+            Transform::Translate(v) => format!("move{v:?}"),
+            Transform::Rotate { angle, .. } => format!("rot{:.0}", angle.to_degrees()),
+            Transform::Mirror { normal, .. } => format!("mirror{normal:?}"),
+        };
+        Ok(Rc::new(MockSolid { desc: format!("{t}({})", s.desc), edges: s.edges.clone() }))
+    }
+
+    fn loft(&self, sections: &[Loop3]) -> Result<Self::Solid, KernelError> {
+        Ok(Rc::new(MockSolid { desc: format!("loft(n={})", sections.len()), edges: vec![] }))
+    }
+
+    fn sweep(&self, p: &PlacedProfile, path: &[Seg3]) -> Result<Self::Solid, KernelError> {
+        let desc = format!("sweep(segs={}, path={})", p.outer.segments.len(), path.len());
+        Ok(Rc::new(MockSolid { desc, edges: vec![] }))
+    }
+
+    /// Every face query hits, as a flat face exactly at the reference.
+    fn find_face(&self, _: &Self::Solid, f: &FaceRef) -> Option<FaceInfo> {
+        Some(FaceInfo { point: f.point, normal: f.normal, planar: true })
+    }
+
+    /// Empty when the description says so (tests build such solids).
+    fn is_empty(&self, s: &Self::Solid) -> bool {
+        s.desc.contains("empty")
+    }
+
+    fn import_step(&self, path: &Path) -> Result<Vec<Self::Solid>, KernelError> {
+        let n = if path.to_string_lossy().contains("two") { 2 } else { 1 };
+        Ok((0..n).map(|i| Rc::new(MockSolid { desc: format!("import({i})"), edges: vec![] })).collect())
+    }
+
+    fn properties(&self, _: &Self::Solid) -> Option<MassProperties> {
+        None
+    }
+
     fn tessellate(&self, _: &Self::Solid, _: f64) -> Result<TriMesh, KernelError> {
         Ok(TriMesh::default())
     }

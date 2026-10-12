@@ -12,32 +12,38 @@ pub enum Segment {
     Arc { center: [f64; 2], from: [f64; 2], to: [f64; 2], ccw: bool },
     /// Full circle (a loop by itself), traversed counter-clockwise when `ccw`.
     Circle { center: [f64; 2], radius: f64, ccw: bool },
+    /// Smooth curve through dense points, in traversal order (a spline or a
+    /// piece of one). Kernels interpolate a B-spline through them.
+    Spline { points: Vec<[f64; 2]> },
 }
 
 impl Segment {
     pub fn start(&self) -> [f64; 2] {
-        match *self {
-            Segment::Line { a, .. } => a,
-            Segment::Arc { from, .. } => from,
+        match self {
+            Segment::Line { a, .. } => *a,
+            Segment::Arc { from, .. } => *from,
             Segment::Circle { center, radius, .. } => [center[0] + radius, center[1]],
+            Segment::Spline { points } => points[0],
         }
     }
 
     pub fn end(&self) -> [f64; 2] {
-        match *self {
-            Segment::Line { b, .. } => b,
-            Segment::Arc { to, .. } => to,
+        match self {
+            Segment::Line { b, .. } => *b,
+            Segment::Arc { to, .. } => *to,
             Segment::Circle { .. } => self.start(),
+            Segment::Spline { points } => points[points.len() - 1],
         }
     }
 
     pub fn reversed(&self) -> Segment {
-        match *self {
-            Segment::Line { a, b } => Segment::Line { a: b, b: a },
+        match self {
+            Segment::Line { a, b } => Segment::Line { a: *b, b: *a },
             Segment::Arc { center, from, to, ccw } => {
-                Segment::Arc { center, from: to, to: from, ccw: !ccw }
+                Segment::Arc { center: *center, from: *to, to: *from, ccw: !ccw }
             }
-            Segment::Circle { center, radius, ccw } => Segment::Circle { center, radius, ccw: !ccw },
+            Segment::Circle { center, radius, ccw } => Segment::Circle { center: *center, radius: *radius, ccw: !ccw },
+            Segment::Spline { points } => Segment::Spline { points: points.iter().rev().copied().collect() },
         }
     }
 
@@ -63,19 +69,34 @@ impl Segment {
         self.point_at(0.5)
     }
 
-    /// Point at curve parameter `t` ∈ [0, 1].
+    /// Point at curve parameter `t` ∈ [0, 1] (arc length for splines).
     pub fn point_at(&self, t: f64) -> [f64; 2] {
-        match *self {
+        match self {
             Segment::Line { a, b } => [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])],
             Segment::Arc { center, from, to, ccw } => {
+                let (center, from) = (*center, *from);
                 let r = (from[0] - center[0]).hypot(from[1] - center[1]);
                 let a0 = (from[1] - center[1]).atan2(from[0] - center[0]);
-                let a = a0 + t * Self::arc_sweep(center, from, to, ccw);
+                let a = a0 + t * Self::arc_sweep(center, from, *to, *ccw);
                 [center[0] + r * a.cos(), center[1] + r * a.sin()]
             }
             Segment::Circle { center, radius, ccw } => {
-                let a = if ccw { t * TAU } else { -t * TAU };
+                let a = if *ccw { t * TAU } else { -t * TAU };
                 [center[0] + radius * a.cos(), center[1] + radius * a.sin()]
+            }
+            Segment::Spline { points } => {
+                let d = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+                let total: f64 = points.windows(2).map(|w| d(w[0], w[1])).sum();
+                let mut left = t.clamp(0.0, 1.0) * total;
+                for w in points.windows(2) {
+                    let l = d(w[0], w[1]);
+                    if left <= l && l > 0.0 {
+                        let f = left / l;
+                        return [w[0][0] + f * (w[1][0] - w[0][0]), w[0][1] + f * (w[1][1] - w[0][1])];
+                    }
+                    left -= l;
+                }
+                points[points.len() - 1]
             }
         }
     }
@@ -84,6 +105,7 @@ impl Segment {
     pub fn sample(&self, steps: usize) -> Vec<[f64; 2]> {
         match self {
             Segment::Line { a, b } => vec![*a, *b],
+            Segment::Spline { points } => points.clone(),
             _ => (0..=steps).map(|i| self.point_at(i as f64 / steps as f64)).collect(),
         }
     }
@@ -113,6 +135,9 @@ impl Loop {
         self.segments
             .iter()
             .map(|s| match *s {
+                Segment::Spline { ref points } => {
+                    points.windows(2).map(|w| 0.5 * (w[0][0] * w[1][1] - w[1][0] * w[0][1])).sum()
+                }
                 Segment::Line { a, b } => 0.5 * (a[0] * b[1] - b[0] * a[1]),
                 Segment::Arc { center: c, from, to, ccw } => {
                     let r2 = (from[0] - c[0]).powi(2) + (from[1] - c[1]).powi(2);

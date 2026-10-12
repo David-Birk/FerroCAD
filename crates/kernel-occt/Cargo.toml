@@ -14,3 +14,6 @@ glam.workspace = true
 # Compile OCCT from source instead of linking the system library (slow:
 # 20–40 min, but needs nothing installed).
 builtin = ["opencascade/builtin"]
+
+[dev-dependencies]
+ferrocad-sketch.workspace = true

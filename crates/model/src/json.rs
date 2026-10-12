@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn floats_roundtrip_exactly() {
-        for x in [0.1 + 0.2, std::f64::consts::PI, 1.0 / 3.0, 123456789.123456789, -0.0] {
+        for x in [0.1 + 0.2, std::f64::consts::PI, 1.0 / 3.0, 123_456_789.123_456_79, -0.0] {
             let back = parse(&Json::Num(x).to_pretty()).unwrap().as_f64().unwrap();
             assert_eq!(back.to_bits(), x.to_bits());
         }

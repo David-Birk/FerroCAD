@@ -175,3 +175,32 @@ fn construction_lines_are_ignored() {
     sk.set_construction(lines[0], true);
     assert!(find_profiles(&sk).is_empty());
 }
+
+#[test]
+fn stale_analysis_does_not_panic() {
+    let mut sk = Sketch::new();
+    let a = sk.analyze();
+    let c = sk.add_circle([0.0, 0.0], 2.0);
+    assert!(!sk.analysis_is_current(&a));
+    assert!(!sk.is_entity_determined(&a, c));
+    assert!(sk.analysis_is_current(&sk.analyze()));
+}
+
+#[test]
+fn point_to_line_distance() {
+    let mut sk = Sketch::new();
+    let l = sk.add_line([0.0, 0.0], [10.0, 0.0]);
+    let (a, b) = match *sk.entity(l) {
+        Entity::Line { a, b } => (a, b),
+        _ => unreachable!(),
+    };
+    sk.set_point_fixed(a, true);
+    sk.set_point_fixed(b, true);
+    let p = sk.add_point([4.0, 3.0]);
+    let c = sk.constrain(Constraint::PointLineDistance(p, l, 7.5));
+    sk.solve().unwrap();
+    assert!((sk.point_pos(p)[1] - 7.5).abs() < 1e-6, "{:?}", sk.point_pos(p));
+    assert!(sk.set_dimension(c, 2.0));
+    sk.solve().unwrap();
+    assert!((sk.point_pos(p)[1] - 2.0).abs() < 1e-6);
+}

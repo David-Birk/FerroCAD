@@ -14,6 +14,7 @@
 mod constraint;
 mod data;
 mod linalg;
+mod ops;
 pub mod profile;
 mod region;
 mod sketch;
@@ -22,5 +23,5 @@ pub mod solver;
 pub use constraint::Constraint;
 pub use data::{EntityData, SketchData};
 pub use profile::{find_profiles, Loop, Profile, Segment};
-pub use sketch::{ConstraintId, Entity, EntityId, ParamId, Point, PointId, Sketch};
+pub use sketch::{spline_samples, ConstraintId, Entity, EntityId, ParamId, Point, PointId, Sketch};
 pub use solver::{Analysis, SolveError, SolveReport};

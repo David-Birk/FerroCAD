@@ -1,5 +1,7 @@
 //! Minimal dense linear algebra – enough for sketches with a few hundred
 //! unknowns. Swap for a sparse solver once sketches get big.
+// Index loops read like the textbook formulas here.
+#![allow(clippy::needless_range_loop)]
 
 /// Row-major dense matrix.
 #[derive(Clone, Debug)]

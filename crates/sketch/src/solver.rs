@@ -208,9 +208,11 @@ impl Sketch {
         Analysis { dof: free.len() - rank, redundant: m - rank, determined }
     }
 
+    /// Parameters added after `analysis` was computed count as free.
     pub fn is_point_determined(&self, analysis: &Analysis, id: PointId) -> bool {
         let p = self.point(id);
-        analysis.determined[p.x.0] && analysis.determined[p.y.0]
+        let det = |i: usize| analysis.determined.get(i).copied().unwrap_or(false);
+        det(p.x.0) && det(p.y.0)
     }
 
     /// Fully constrained entity: all its points (and radius) are determined.
@@ -218,9 +220,14 @@ impl Sketch {
         let e = self.entity(id);
         let pts = e.points().into_iter().all(|p| self.is_point_determined(analysis, p));
         match *e {
-            Entity::Circle { radius, .. } => pts && analysis.determined[radius.0],
+            Entity::Circle { radius, .. } => pts && analysis.determined.get(radius.0).copied().unwrap_or(false),
             _ => pts,
         }
+    }
+
+    /// Whether `analysis` still describes this sketch's parameters.
+    pub fn analysis_is_current(&self, analysis: &Analysis) -> bool {
+        analysis.determined.len() == self.params.len()
     }
 }
 

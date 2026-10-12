@@ -5,9 +5,11 @@
 //! created so far. A failing feature is marked as an error and skipped; the
 //! features after it still run, like Fusion's red timeline icons.
 
-use crate::feature::{Feature, FeatureId, FeatureKind, Operation, RevolveAxis, SketchFeature};
-use crate::geom::{distance, normalize, sub};
-use crate::kernel::{polyline_midpoint, BooleanOp, EdgeRef, Kernel, PlacedProfile};
+use crate::feature::*;
+use crate::geom::{add, cross, distance, dot, length, normalize, scale, sub, Plane, Vec3};
+use crate::kernel::{
+    polyline_midpoint, BooleanOp, EdgeRef, FaceInfo, FaceRef, Kernel, Loop3, PlacedProfile, Seg3, Transform,
+};
 use crate::params::ParamTable;
 use ferrocad_sketch::profile::profile_at;
 use ferrocad_sketch::{find_profiles, Constraint};
@@ -37,9 +39,34 @@ pub struct Body<S> {
 pub struct Model<S> {
     pub bodies: Vec<Body<S>>,
     pub status: HashMap<FeatureId, FeatureStatus>,
+    /// Construction planes by feature.
+    pub planes: HashMap<FeatureId, Plane>,
+    /// Construction axes by feature: (point, direction).
+    pub axes: HashMap<FeatureId, (Vec3, Vec3)>,
+    /// Components: (name, body names).
+    pub components: Vec<(String, Vec<String>)>,
 }
 
 impl<S> Model<S> {
+    pub fn empty() -> Self {
+        Model {
+            bodies: Vec::new(),
+            status: HashMap::new(),
+            planes: HashMap::new(),
+            axes: HashMap::new(),
+            components: Vec::new(),
+        }
+    }
+
+    pub fn body(&self, name: &str) -> Option<&Body<S>> {
+        self.bodies.iter().find(|b| b.name == name)
+    }
+
+    /// The component a body belongs to.
+    pub fn component_of(&self, body: &str) -> Option<&str> {
+        self.components.iter().find(|(_, b)| b.iter().any(|n| n == body)).map(|(c, _)| c.as_str())
+    }
+
     pub fn status(&self, id: FeatureId) -> &FeatureStatus {
         self.status.get(&id).unwrap_or(&FeatureStatus::RolledBack)
     }
@@ -55,10 +82,22 @@ impl<S> Model<S> {
 #[derive(Clone, Debug, Default)]
 pub struct Document {
     pub params: ParamTable,
+    /// What is hidden in the viewport (saved with the file, not part of the recipe).
+    pub view: ViewState,
     pub(crate) features: Vec<Feature>,
     /// Number of features that are evaluated (the timeline marker).
     pub(crate) marker: usize,
     pub(crate) next_id: u64,
+}
+
+/// Display state stored in the document.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ViewState {
+    pub hidden_bodies: Vec<String>,
+    /// Appearance (material name) per body name.
+    pub appearances: Vec<(String, String)>,
+    /// Hidden sketches and construction geometry.
+    pub hidden_features: Vec<FeatureId>,
 }
 
 impl Document {
@@ -118,7 +157,7 @@ impl Document {
         let users: Vec<&str> = self
             .features
             .iter()
-            .filter(|f| f.kind.sketch_ref() == Some(id))
+            .filter(|f| f.kind.references().contains(&id))
             .map(|f| f.name.as_str())
             .collect();
         if !users.is_empty() {
@@ -139,14 +178,13 @@ impl Document {
         let to = to.min(self.features.len() - 1);
         let f = self.features.remove(from);
         self.features.insert(to, f);
-        let ok = self.features.iter().enumerate().all(|(i, f)| match f.kind.sketch_ref() {
-            Some(sketch) => self.index_of(sketch).is_some_and(|s| s < i),
-            None => true,
+        let ok = self.features.iter().enumerate().all(|(i, f)| {
+            f.kind.references().iter().all(|r| self.index_of(*r).is_some_and(|s| s < i))
         });
         if !ok {
             let f = self.features.remove(to);
             self.features.insert(from, f);
-            return Err("a feature must come after the sketch it uses".into());
+            return Err("a feature must come after the features it uses".into());
         }
         Ok(())
     }
@@ -161,7 +199,7 @@ impl Document {
 
     /// Replay the timeline with kernel `k`.
     pub fn rebuild<K: Kernel>(&mut self, k: &K) -> Model<K::Solid> {
-        let mut model = Model { bodies: Vec::new(), status: HashMap::new() };
+        let mut model = Model::empty();
         let mut body_counter = 0;
 
         for i in 0..self.features.len() {
@@ -177,6 +215,12 @@ impl Document {
                 }
             };
             model.status.insert(id, status);
+            // Removed bodies leave their component; empty components vanish.
+            let alive: Vec<String> = model.bodies.iter().map(|b| b.name.clone()).collect();
+            for (_, list) in &mut model.components {
+                list.retain(|b| alive.contains(b));
+            }
+            model.components.retain(|(_, list)| !list.is_empty());
         }
         model
     }
@@ -189,8 +233,25 @@ impl Document {
         body_counter: &mut usize,
     ) -> Result<(), String> {
         let id = self.features[i].id;
+        // Attached sketches follow their plane.
+        if let FeatureKind::Sketch(SketchFeature { attach: Some(a), .. }) = &self.features[i].kind {
+            let a = *a;
+            let plane = resolve_plane(k, model, &a)?;
+            if let FeatureKind::Sketch(s) = &mut self.features[i].kind {
+                s.plane = plane;
+            }
+        }
+        // Projected edges follow the bodies built so far.
+        if matches!(&self.features[i].kind, FeatureKind::Sketch(s) if !s.projections.is_empty()) {
+            let edges: Vec<Vec<Vec3>> = model.bodies.iter().flat_map(|b| k.edges(&b.solid)).collect();
+            if let FeatureKind::Sketch(s) = &mut self.features[i].kind {
+                crate::project::update_projections(s, &edges)?;
+            }
+        }
         // Split borrows: parameters are read while the feature is mutated.
         let params = &self.params;
+        let eval = |e: &str| params.eval(e).map_err(|e| e.to_string());
+        let kerr = |e: crate::kernel::KernelError| e.0;
         match &mut self.features[i].kind {
             FeatureKind::Sketch(s) => {
                 for (cid, expr) in &s.driven {
@@ -224,6 +285,7 @@ impl Document {
                 let (origin, dir) = match r.axis {
                     RevolveAxis::SketchX => (s.plane.origin, s.plane.x_axis),
                     RevolveAxis::SketchY => (s.plane.origin, s.plane.y_axis),
+                    RevolveAxis::Axis(a) => resolve_axis(model, &a)?,
                     RevolveAxis::Line(l) => {
                         let ferrocad_sketch::Entity::Line { a, b } = *s.sketch.entity(l) else {
                             return Err("axis is not a line".into());
@@ -289,11 +351,394 @@ impl Document {
                 }
                 Ok(())
             }
+
+            FeatureKind::Plane(p) => {
+                let p = p.clone();
+                let base = resolve_plane(k, model, &p.base)?;
+                let offset = eval(&p.offset)?;
+                let angle = eval(&p.angle)?.to_radians();
+                let n = base.normal();
+                let y_axis = add(scale(base.y_axis, angle.cos()), scale(n, angle.sin()));
+                let turned = Plane { origin: base.origin, x_axis: base.x_axis, y_axis };
+                let plane = Plane { origin: add(base.origin, scale(turned.normal(), offset)), ..turned };
+                model.planes.insert(id, plane);
+                Ok(())
+            }
+
+            FeatureKind::Axis(a) => {
+                let axis = match a.source {
+                    AxisSource::FaceNormal(f) => {
+                        let (_, info) = find_face(k, model, &f)?;
+                        (info.point, info.normal)
+                    }
+                    AxisSource::Edge(e) => edge_axis(k, model, &e)?,
+                };
+                model.axes.insert(id, axis);
+                Ok(())
+            }
+
+            FeatureKind::PressPull(pp) => {
+                let pp = pp.clone();
+                let d = eval(&pp.distance)?;
+                if d.abs() < 1e-9 {
+                    return Err("distance is zero".into());
+                }
+                let (bi, _) = find_face(k, model, &pp.face)?;
+                let solid = &model.bodies[bi].solid;
+                let tool = k.extrude_face(solid, &pp.face, d).map_err(kerr)?;
+                let op = if d > 0.0 { BooleanOp::Union } else { BooleanOp::Subtract };
+                model.bodies[bi].solid = k.boolean(op, solid, &tool).map_err(kerr)?;
+                Ok(())
+            }
+
+            FeatureKind::Shell(sh) => {
+                let sh = sh.clone();
+                let t = eval(&sh.thickness)?;
+                if t <= 0.0 {
+                    return Err("thickness must be positive".into());
+                }
+                let first = sh.faces.first().ok_or("pick at least one face to remove")?;
+                let (bi, _) = find_face(k, model, first)?;
+                for f in &sh.faces[1..] {
+                    if find_face(k, model, f)?.0 != bi {
+                        return Err("all faces must belong to the same body".into());
+                    }
+                }
+                model.bodies[bi].solid = k.shell(&model.bodies[bi].solid, &sh.faces, t).map_err(kerr)?;
+                Ok(())
+            }
+
+            FeatureKind::Hole(h) => {
+                let h = h.clone();
+                let diameter = eval(&h.diameter)?;
+                if diameter <= 0.0 {
+                    return Err("diameter must be positive".into());
+                }
+                let depth = if h.through { 1e4 } else { eval(&h.depth)? };
+                if depth <= 0.0 {
+                    return Err("depth must be positive".into());
+                }
+                let (bi, info) = find_face(k, model, &h.face)?;
+                if !info.planar {
+                    return Err("holes need a flat face".into());
+                }
+                let n = normalize(info.normal);
+                // Start a little above the face so the cut is clean.
+                let eps = 0.01;
+                let on_face = sub(h.face.point, scale(n, dot(sub(h.face.point, info.point), n)));
+                let center = add(on_face, scale(n, eps));
+                let profile = PlacedProfile {
+                    outer: Loop3 { segments: vec![Seg3::Circle { center, normal: n, radius: diameter / 2.0 }] },
+                    holes: vec![],
+                    normal: n,
+                };
+                let mut tools = vec![k.extrude(&profile, -(depth + eps), false).map_err(kerr)?];
+                match &h.head {
+                    HoleHead::None => {}
+                    HoleHead::Counterbore { diameter: hd, depth: hdepth } => {
+                        let (hd, hdepth) = (eval(hd)?, eval(hdepth)?);
+                        if hd <= diameter || hdepth <= 0.0 {
+                            return Err("counterbore must be wider than the hole and have a depth".into());
+                        }
+                        let head = PlacedProfile {
+                            outer: Loop3 { segments: vec![Seg3::Circle { center, normal: n, radius: hd / 2.0 }] },
+                            holes: vec![],
+                            normal: n,
+                        };
+                        tools.push(k.extrude(&head, -(hdepth + eps), false).map_err(kerr)?);
+                    }
+                    HoleHead::Countersink { diameter: hd, angle } => {
+                        let (hd, angle) = (eval(hd)?, eval(angle)?);
+                        if hd <= diameter || !(10.0..170.0).contains(&angle) {
+                            return Err("countersink must be wider than the hole, angle 10–170°".into());
+                        }
+                        // Cone: revolve a right triangle around the hole axis.
+                        let half = (angle / 2.0).to_radians();
+                        let r = hd / 2.0 + eps * half.tan();
+                        let h_cone = r / half.tan();
+                        let u = normalize(cross(n, if n[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }));
+                        let at = |radial: f64, axial: f64| add(center, add(scale(u, radial), scale(n, axial)));
+                        let (p0, p1, p2) = (at(0.0, 0.0), at(r, 0.0), at(0.0, -h_cone));
+                        let segments = vec![Seg3::Line { a: p0, b: p1 }, Seg3::Line { a: p1, b: p2 }, Seg3::Line { a: p2, b: p0 }];
+                        let profile = PlacedProfile { outer: Loop3 { segments }, holes: vec![], normal: cross(u, n) };
+                        tools.push(k.revolve(&profile, center, n, std::f64::consts::TAU).map_err(kerr)?);
+                    }
+                }
+                let targets: Vec<usize> = if h.through { (0..model.bodies.len()).collect() } else { vec![bi] };
+                for b in targets {
+                    for tool in &tools {
+                        model.bodies[b].solid =
+                            k.boolean(BooleanOp::Subtract, &model.bodies[b].solid, tool).map_err(kerr)?;
+                    }
+                }
+                Ok(())
+            }
+
+            FeatureKind::Mirror(m) => {
+                let m = m.clone();
+                let plane = resolve_plane(k, model, &m.plane)?;
+                let t = Transform::Mirror { origin: plane.origin, normal: plane.normal() };
+                for name in &expand(model, &m.bodies) {
+                    let bi = body_index(model, name)?;
+                    let image = k.transform(&model.bodies[bi].solid, &t).map_err(kerr)?;
+                    if m.join {
+                        let joined = k.boolean(BooleanOp::Union, &model.bodies[bi].solid, &image).map_err(kerr)?;
+                        model.bodies[bi].solid = joined;
+                    } else {
+                        push_body(model, body_counter, image, id);
+                    }
+                }
+                Ok(())
+            }
+
+            FeatureKind::Pattern(p) => {
+                let p = p.clone();
+                let count = |e: &str| -> Result<usize, String> {
+                    let n = eval(e)?.round();
+                    if !(1.0..=500.0).contains(&n) {
+                        return Err("count must be between 1 and 500".into());
+                    }
+                    Ok(n as usize)
+                };
+                let mut transforms = Vec::new();
+                match &p.kind {
+                    PatternKind::Rectangular { direction, count: c1, spacing, direction2, count2, spacing2 } => {
+                        let d1 = normalize(resolve_axis(model, direction)?.1);
+                        let d2 = normalize(resolve_axis(model, direction2)?.1);
+                        let (n1, n2) = (count(c1)?, count(count2)?);
+                        let (s1, s2) = (eval(spacing)?, if n2 > 1 { eval(spacing2)? } else { 0.0 });
+                        for a in 0..n1 {
+                            for b in 0..n2 {
+                                if a + b > 0 {
+                                    let v = add(scale(d1, s1 * a as f64), scale(d2, s2 * b as f64));
+                                    transforms.push(Transform::Translate(v));
+                                }
+                            }
+                        }
+                    }
+                    PatternKind::Circular { axis, count: c, angle } => {
+                        let (origin, dir) = resolve_axis(model, axis)?;
+                        let n = count(c)?;
+                        let total = eval(angle)?;
+                        let full = (total.abs() - 360.0).abs() < 1e-9;
+                        let step = if full || n < 2 { total / n as f64 } else { total / (n - 1) as f64 };
+                        for a in 1..n {
+                            let angle = (step * a as f64).to_radians();
+                            transforms.push(Transform::Rotate { origin, axis: normalize(dir), angle });
+                        }
+                    }
+                }
+                if transforms.is_empty() {
+                    return Err("the pattern has only one instance".into());
+                }
+                for name in &expand(model, &p.bodies) {
+                    let bi = body_index(model, name)?;
+                    let source = model.bodies[bi].solid.clone();
+                    let mut acc = source.clone();
+                    for t in &transforms {
+                        let copy = k.transform(&source, t).map_err(kerr)?;
+                        if p.join {
+                            acc = k.boolean(BooleanOp::Union, &acc, &copy).map_err(kerr)?;
+                        } else {
+                            push_body(model, body_counter, copy, id);
+                        }
+                    }
+                    model.bodies[bi].solid = acc;
+                }
+                Ok(())
+            }
+
+            FeatureKind::Combine(c) => {
+                let c = c.clone();
+                let ti = body_index(model, &c.target)?;
+                if c.tools.is_empty() {
+                    return Err("pick at least one tool body".into());
+                }
+                let op = match c.op {
+                    CombineOp::Join => BooleanOp::Union,
+                    CombineOp::Cut => BooleanOp::Subtract,
+                    CombineOp::Intersect => BooleanOp::Intersect,
+                };
+                for name in &c.tools {
+                    let bi = body_index(model, name)?;
+                    if bi == ti {
+                        return Err("a body cannot be combined with itself".into());
+                    }
+                    model.bodies[ti].solid =
+                        k.boolean(op, &model.bodies[ti].solid, &model.bodies[bi].solid).map_err(kerr)?;
+                }
+                if k.is_empty(&model.bodies[ti].solid) {
+                    return Err("nothing is left of the target body".into());
+                }
+                if !c.keep_tools {
+                    model.bodies.retain(|b| !c.tools.contains(&b.name));
+                }
+                Ok(())
+            }
+
+            FeatureKind::Split(sp) => {
+                let sp = sp.clone();
+                let bi = body_index(model, &sp.body)?;
+                let plane = resolve_plane(k, model, &sp.plane)?;
+                let l = 1e4;
+                let corners = [[-l, -l], [l, -l], [l, l], [-l, l]].map(|uv| plane.to_world(uv));
+                let segments = (0..4).map(|j| Seg3::Line { a: corners[j], b: corners[(j + 1) % 4] }).collect();
+                let profile = PlacedProfile { outer: Loop3 { segments }, holes: vec![], normal: plane.normal() };
+                let half = k.extrude(&profile, l, false).map_err(kerr)?;
+                let solid = &model.bodies[bi].solid;
+                let above = k.boolean(BooleanOp::Intersect, solid, &half).map_err(kerr)?;
+                let below = k.boolean(BooleanOp::Subtract, solid, &half).map_err(kerr)?;
+                if k.is_empty(&above) || k.is_empty(&below) {
+                    return Err("the plane does not cut the body".into());
+                }
+                model.bodies[bi].solid = below;
+                push_body(model, body_counter, above, id);
+                Ok(())
+            }
+
+            FeatureKind::Move(mv) => {
+                let mv = mv.clone();
+                let v = [eval(&mv.translate[0])?, eval(&mv.translate[1])?, eval(&mv.translate[2])?];
+                let angle = eval(&mv.angle)?.to_radians();
+                let rotation = match mv.axis {
+                    Some(a) if angle.abs() > 1e-12 => Some(resolve_axis(model, &a)?),
+                    _ => None,
+                };
+                for name in &expand(model, &mv.bodies) {
+                    let bi = body_index(model, name)?;
+                    let mut solid = model.bodies[bi].solid.clone();
+                    if length(v) > 1e-12 {
+                        solid = k.transform(&solid, &Transform::Translate(v)).map_err(kerr)?;
+                    }
+                    if let Some((origin, axis)) = rotation {
+                        let t = Transform::Rotate { origin, axis: normalize(axis), angle };
+                        solid = k.transform(&solid, &t).map_err(kerr)?;
+                    }
+                    if mv.copy {
+                        push_body(model, body_counter, solid, id);
+                    } else {
+                        model.bodies[bi].solid = solid;
+                    }
+                }
+                Ok(())
+            }
+
+            FeatureKind::Loft(lf) => {
+                let lf = lf.clone();
+                if lf.profiles.len() < 2 {
+                    return Err("a loft needs at least two profiles".into());
+                }
+                let mut sections = Vec::new();
+                for p in &lf.profiles {
+                    let (_, placed) = self.placed_profile(i, p.sketch, p.point)?;
+                    sections.push(placed.outer);
+                }
+                let tool = k.loft(&sections).map_err(kerr)?;
+                apply_operation(k, model, lf.operation, tool, id, body_counter)
+            }
+
+            FeatureKind::Sweep(sw) => {
+                let sw = sw.clone();
+                let (_, placed) = self.placed_profile(i, sw.profile.sketch, sw.profile.point)?;
+                let path_sketch = self.sketch_before(i, sw.path_sketch)?;
+                let path = path_segments(path_sketch, &sw.path)?;
+                let tool = k.sweep(&placed, &path).map_err(kerr)?;
+                apply_operation(k, model, sw.operation, tool, id, body_counter)
+            }
+
+            FeatureKind::Joint(j) => {
+                let j = j.clone();
+                let (p1, z1) = joint_frame(k, model, &j.from)?;
+                let (p2, z2) = joint_frame(k, model, &j.to)?;
+                let angle = eval(&j.angle)?.to_radians();
+                let offset = eval(&j.offset)?;
+                let target = if j.flip { z2 } else { scale(z2, -1.0) };
+                // 1. turn the moving part so its z points at `target`, about p1
+                let mut steps: Vec<Transform> = Vec::new();
+                let axis = cross(z1, target);
+                let c = dot(z1, target).clamp(-1.0, 1.0);
+                if length(axis) > 1e-9 {
+                    steps.push(Transform::Rotate { origin: p1, axis: normalize(axis), angle: c.acos() });
+                } else if c < 0.0 {
+                    // opposite: any perpendicular axis
+                    let perp = normalize(cross(z1, if z1[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }));
+                    steps.push(Transform::Rotate { origin: p1, axis: perp, angle: std::f64::consts::PI });
+                }
+                // 2. move the origins together (plus the offset along the axis)
+                steps.push(Transform::Translate(add(sub(p2, p1), scale(z2, offset))));
+                // 3. the joint angle around the fixed part's axis
+                if angle.abs() > 1e-12 {
+                    steps.push(Transform::Rotate { origin: add(p2, scale(z2, offset)), axis: z2, angle });
+                }
+                for name in &expand(model, &j.moving) {
+                    let bi = body_index(model, name)?;
+                    let mut solid = model.bodies[bi].solid.clone();
+                    for t in &steps {
+                        solid = k.transform(&solid, t).map_err(kerr)?;
+                    }
+                    model.bodies[bi].solid = solid;
+                }
+                Ok(())
+            }
+
+            FeatureKind::Component(c) => {
+                let c = c.clone();
+                if c.bodies.is_empty() {
+                    return Err("a component needs at least one body".into());
+                }
+                if model.components.iter().any(|(n, _)| *n == c.name) || model.bodies.iter().any(|b| b.name == c.name) {
+                    return Err(format!("the name {} is already used", c.name));
+                }
+                for b in &c.bodies {
+                    body_index(model, b)?;
+                }
+                // A body belongs to one component: take it out of any other.
+                for (_, list) in &mut model.components {
+                    list.retain(|b| !c.bodies.contains(b));
+                }
+                model.components.retain(|(_, list)| !list.is_empty());
+                model.components.push((c.name, c.bodies));
+                Ok(())
+            }
+
+            FeatureKind::Import(im) => {
+                let solids = k.import_step(std::path::Path::new(&im.path)).map_err(kerr)?;
+                if solids.is_empty() {
+                    return Err("the file contains no solids".into());
+                }
+                for s in solids {
+                    push_body(model, body_counter, s, id);
+                }
+                Ok(())
+            }
+
+            FeatureKind::Remove(r) => {
+                for name in expand(model, &r.bodies) {
+                    let bi = body_index(model, &name)?;
+                    model.bodies.remove(bi);
+                }
+                Ok(())
+            }
         }
     }
 }
 
 impl Document {
+    /// The sketch feature `sketch`, which must come before position `user`.
+    fn sketch_before(&self, user: usize, sketch: FeatureId) -> Result<&SketchFeature, String> {
+        let si = self.index_of(sketch).ok_or("sketch was deleted")?;
+        if si >= user {
+            return Err("the sketch comes after this feature".into());
+        }
+        if self.features[si].suppressed {
+            return Err("sketch is suppressed".into());
+        }
+        match &self.features[si].kind {
+            FeatureKind::Sketch(s) => Ok(s),
+            _ => Err("referenced feature is not a sketch".into()),
+        }
+    }
+
     /// The sketch feature at `sketch` (which must come before timeline
     /// position `user`) and its profile containing `point`, placed in 3D.
     fn placed_profile(
@@ -302,21 +747,225 @@ impl Document {
         sketch: FeatureId,
         point: [f64; 2],
     ) -> Result<(&SketchFeature, PlacedProfile), String> {
-        let si = self.index_of(sketch).ok_or("sketch was deleted")?;
-        if si >= user {
-            return Err("the sketch comes after this feature".into());
-        }
-        if self.features[si].suppressed {
-            return Err("sketch is suppressed".into());
-        }
-        let FeatureKind::Sketch(s) = &self.features[si].kind else {
-            return Err("referenced feature is not a sketch".into());
-        };
+        let s = self.sketch_before(user, sketch)?;
         let profiles = find_profiles(&s.sketch);
         let pi = profile_at(&profiles, point)
             .ok_or("profile no longer exists – edit the feature to pick it again")?;
         Ok((s, PlacedProfile::new(&profiles[pi], &s.plane)))
     }
+}
+
+fn push_body<S>(model: &mut Model<S>, body_counter: &mut usize, solid: S, created_by: FeatureId) {
+    *body_counter += 1;
+    model.bodies.push(Body { name: format!("Body{body_counter}"), solid, created_by });
+}
+
+/// Body names with component names replaced by their bodies.
+fn expand<S>(model: &Model<S>, names: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for n in names {
+        match model.components.iter().find(|(c, _)| c == n) {
+            Some((_, bodies)) => out.extend(bodies.iter().cloned()),
+            None => out.push(n.clone()),
+        }
+    }
+    out
+}
+
+fn body_index<S>(model: &Model<S>, name: &str) -> Result<usize, String> {
+    model.bodies.iter().position(|b| b.name == name).ok_or_else(|| format!("{name} no longer exists"))
+}
+
+/// The body owning the face matched by `face`, and the face itself.
+pub fn find_face<K: Kernel>(k: &K, model: &Model<K::Solid>, face: &FaceRef) -> Result<(usize, FaceInfo), String> {
+    model
+        .bodies
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| k.find_face(&b.solid, face).map(|f| (i, f)))
+        .min_by(|a, b| distance(a.1.point, face.point).total_cmp(&distance(b.1.point, face.point)))
+        .ok_or_else(|| "the face no longer exists – re-pick it".to_string())
+}
+
+fn resolve_plane<K: Kernel>(k: &K, model: &Model<K::Solid>, p: &PlaneRef) -> Result<Plane, String> {
+    match p {
+        PlaneRef::Origin(o) => Ok(o.plane()),
+        PlaneRef::Construction(id) => {
+            model.planes.get(id).copied().ok_or_else(|| "the construction plane is missing or failed".into())
+        }
+        PlaneRef::Face(f) => {
+            let (_, info) = find_face(k, model, f)?;
+            if !info.planar {
+                return Err("the face is not flat".into());
+            }
+            Ok(Plane::at_face(info.point, info.normal))
+        }
+    }
+}
+
+/// Origin and unit z axis of a joint origin.
+fn joint_frame<K: Kernel>(k: &K, model: &Model<K::Solid>, o: &JointOrigin) -> Result<(Vec3, Vec3), String> {
+    match o {
+        JointOrigin::Face(f) => {
+            let (_, info) = find_face(k, model, f)?;
+            // Keep the picked spot, moved onto the face as it is now.
+            let n = normalize(info.normal);
+            let p = sub(f.point, scale(n, dot(sub(f.point, info.point), n)));
+            Ok((p, n))
+        }
+        JointOrigin::Edge(e) => {
+            let poly = model
+                .bodies
+                .iter()
+                .flat_map(|b| k.edges(&b.solid))
+                .filter_map(|pl| polyline_midpoint(&pl).map(|m| (distance(m, e.point), pl)))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .filter(|(d, _)| *d < EDGE_MATCH_TOLERANCE)
+                .map(|(_, pl)| pl)
+                .ok_or("a joint edge moved or disappeared – re-pick it")?;
+            let (o, dir) = polyline_axis(&poly).ok_or("the joint edge is neither straight nor circular")?;
+            let straight = poly.len() == 2 || distance(o, poly[0]) < 1e-9;
+            if straight {
+                Ok((polyline_midpoint(&poly).unwrap_or(o), normalize(dir)))
+            } else {
+                Ok((o, normalize(dir)))
+            }
+        }
+    }
+}
+
+fn resolve_axis<S>(model: &Model<S>, a: &AxisRef) -> Result<(Vec3, Vec3), String> {
+    match a {
+        AxisRef::World(i) => {
+            let mut d = [0.0; 3];
+            d[(*i).min(2)] = 1.0;
+            Ok(([0.0; 3], d))
+        }
+        AxisRef::Construction(id) => {
+            model.axes.get(id).copied().ok_or_else(|| "the construction axis is missing or failed".into())
+        }
+    }
+}
+
+/// Axis of the edge matched by `e`: along a straight edge, or through the
+/// centre of a circular one.
+fn edge_axis<K: Kernel>(k: &K, model: &Model<K::Solid>, e: &EdgeRef) -> Result<(Vec3, Vec3), String> {
+    let poly = model
+        .bodies
+        .iter()
+        .flat_map(|b| k.edges(&b.solid))
+        .filter_map(|pl| polyline_midpoint(&pl).map(|m| (distance(m, e.point), pl)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .filter(|(d, _)| *d < EDGE_MATCH_TOLERANCE)
+        .map(|(_, pl)| pl)
+        .ok_or("the edge moved or disappeared – re-pick it")?;
+    polyline_axis(&poly).ok_or_else(|| "the edge is neither straight nor circular".into())
+}
+
+/// Axis of a polyline: its direction if straight, else the axis of the
+/// circle through three of its points.
+pub fn polyline_axis(poly: &[Vec3]) -> Option<(Vec3, Vec3)> {
+    let (&first, &last) = (poly.first()?, poly.last()?);
+    let span = sub(last, first);
+    let len = length(span);
+    let straight = len > 1e-9
+        && poly.iter().all(|p| {
+            let d = sub(*p, first);
+            length(cross(d, span)) / len < 1e-6 * (1.0 + len)
+        });
+    if straight {
+        return Some((first, scale(span, 1.0 / len)));
+    }
+    let n = poly.len();
+    let (p0, p1, p2) = if distance(first, last) < 1e-9 {
+        (poly[0], poly[n / 3], poly[2 * n / 3])
+    } else {
+        (first, poly[n / 2], last)
+    };
+    let (a, b) = (sub(p1, p0), sub(p2, p0));
+    let axb = cross(a, b);
+    let d = 2.0 * dot(axb, axb);
+    if d < 1e-18 {
+        return None;
+    }
+    let num = add(scale(cross(b, axb), dot(a, a)), scale(cross(axb, a), dot(b, b)));
+    let center = add(p0, scale(num, 1.0 / d));
+    Some((center, normalize(axb)))
+}
+
+/// Lines and arcs of a sketch chained into a connected, consistently
+/// oriented path.
+fn path_segments(sf: &SketchFeature, ids: &[ferrocad_sketch::EntityId]) -> Result<Vec<Seg3>, String> {
+    use ferrocad_sketch::{Entity, Segment};
+    let sk = &sf.sketch;
+    let mut pieces: Vec<(Vec3, Vec3, Seg3)> = Vec::new();
+    for &id in ids {
+        if !sk.is_alive(id) {
+            return Err("a path curve was deleted".into());
+        }
+        let w = |uv: [f64; 2]| sf.plane.to_world(uv);
+        match *sk.entity(id) {
+            Entity::Line { a, b } => {
+                let (a, b) = (w(sk.point_pos(a)), w(sk.point_pos(b)));
+                pieces.push((a, b, Seg3::Line { a, b }));
+            }
+            Entity::Arc { center, start, end } => {
+                let seg = Segment::Arc {
+                    center: sk.point_pos(center),
+                    from: sk.point_pos(start),
+                    to: sk.point_pos(end),
+                    ccw: true,
+                };
+                let (s, m, e) = (w(sk.point_pos(start)), w(seg.midpoint()), w(sk.point_pos(end)));
+                pieces.push((s, e, Seg3::Arc { start: s, mid: m, end: e }));
+            }
+            Entity::Circle { .. } => return Err("a sweep path cannot contain circles".into()),
+            Entity::Spline { .. } => {
+                let pts: Vec<Vec3> = sk.spline_points(id, 12).into_iter().map(w).collect();
+                let (s, e) = (pts[0], pts[pts.len() - 1]);
+                pieces.push((s, e, Seg3::Spline { points: pts }));
+            }
+        }
+    }
+    if pieces.is_empty() {
+        return Err("pick the path curves".into());
+    }
+    let close = |a: Vec3, b: Vec3| distance(a, b) < 1e-6;
+    let flip = |(a, b, s): (Vec3, Vec3, Seg3)| {
+        let s = match s {
+            Seg3::Line { a, b } => Seg3::Line { a: b, b: a },
+            Seg3::Arc { start, mid, end } => Seg3::Arc { start: end, mid, end: start },
+            Seg3::Spline { mut points } => {
+                points.reverse();
+                Seg3::Spline { points }
+            }
+            other => other,
+        };
+        (b, a, s)
+    };
+    // Start at a free end if the path is open.
+    let all = pieces.clone();
+    let free = |p: Vec3| all.iter().filter(|(a, b, _)| close(*a, p) || close(*b, p)).count() == 1;
+    let start = (0..pieces.len()).find(|&j| free(pieces[j].0) || free(pieces[j].1)).unwrap_or(0);
+    let mut first = pieces.remove(start);
+    if !free(first.0) && free(first.1) {
+        first = flip(first);
+    }
+    let mut end = first.1;
+    let mut chain = vec![first.2];
+    while !pieces.is_empty() {
+        let j = pieces
+            .iter()
+            .position(|(a, b, _)| close(*a, end) || close(*b, end))
+            .ok_or("the path curves are not connected")?;
+        let mut p = pieces.remove(j);
+        if !close(p.0, end) {
+            p = flip(p);
+        }
+        end = p.1;
+        chain.push(p.2);
+    }
+    Ok(chain)
 }
 
 fn apply_operation<K: Kernel>(

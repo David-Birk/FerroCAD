@@ -32,3 +32,9 @@ egui = "0.36"
 # Dependencies (OCCT glue, wgpu) optimised even in debug builds – the viewport
 # is unusable otherwise.
 opt-level = 2
+
+# opencascade-rs main does not build against OCCT 7.9 (Arch's version), see
+# vendor/opencascade-sys/include/topo_ds.hxx. Local fork until fixed upstream.
+[patch."https://github.com/bschwind/opencascade-rs"]
+opencascade-sys = { path = "vendor/opencascade-sys" }
+opencascade = { path = "vendor/opencascade" }

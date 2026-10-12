@@ -1,16 +1,19 @@
 //! [`Kernel`] backed by OpenCascade through `opencascade-rs`.
 //!
-//! Known gap: `opencascade-rs` does not yet report failed fillets/chamfers
-//! as errors – OCCT throws a C++ exception, which aborts the process. The
-//! fix is a small upstream change (check `IsDone()` before `Shape()`); until
-//! then avoid fillet radii larger than the adjacent faces allow.
+//! Every modelling operation goes through `opencascade::safe` (our vendored
+//! fork), which checks `IsDone()` and catches OCCT exceptions in C++, so a
+//! fillet radius that is too big becomes a [`KernelError`] instead of
+//! aborting the process.
 
 use ferrocad_model::geom::{distance, scale, Vec3};
 use ferrocad_model::kernel::polyline_midpoint;
-use ferrocad_model::{BooleanOp, EdgeRef, Kernel, KernelError, Loop3, PlacedProfile, Seg3, TriMesh};
+use ferrocad_model::{
+    BooleanOp, EdgeRef, FaceInfo, FaceRef, Kernel, KernelError, Loop3, MassProperties, PlacedProfile, Seg3,
+    Transform, TriMesh,
+};
 use glam::{dvec3, DVec3};
-use opencascade::angle::Angle;
-use opencascade::primitives::{Edge, Face, Shape, Wire};
+use opencascade::primitives::Shape;
+use opencascade::safe::{self, BoolOp};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -31,46 +34,77 @@ fn a(p: DVec3) -> Vec3 {
     [p.x, p.y, p.z]
 }
 
-fn edge(seg: &Seg3) -> Edge {
-    match *seg {
-        Seg3::Line { a, b } => Edge::segment(v(a), v(b)),
-        Seg3::Arc { start, mid, end } => Edge::arc(v(start), v(mid), v(end)),
-        Seg3::Circle { center, normal, radius } => Edge::circle(v(center), v(normal), radius),
+fn err(e: String) -> KernelError {
+    KernelError(e)
+}
+
+/// Encode a loop for `opencascade::safe` (see `ferro.hxx`).
+fn encode_loop(lp: &Loop3, out: &mut Vec<f64>) {
+    out.push(lp.segments.len() as f64);
+    for seg in &lp.segments {
+        match *seg {
+            Seg3::Line { a, b } => {
+                out.push(0.0);
+                out.extend(a);
+                out.extend(b);
+            }
+            Seg3::Arc { start, mid, end } => {
+                out.push(1.0);
+                out.extend(start);
+                out.extend(mid);
+                out.extend(end);
+            }
+            Seg3::Circle { center, normal, radius } => {
+                out.push(2.0);
+                out.extend(center);
+                out.extend(normal);
+                out.push(radius);
+            }
+            Seg3::Spline { ref points } => {
+                out.push(3.0);
+                out.push(points.len() as f64);
+                for p in points {
+                    out.extend(*p);
+                }
+            }
+        }
     }
 }
 
-fn wire(lp: &Loop3) -> Result<Wire, KernelError> {
-    if lp.segments.is_empty() {
+fn profile_face(profile: &PlacedProfile) -> Result<Shape, KernelError> {
+    if profile.outer.segments.is_empty() {
         return Err(KernelError("empty profile loop".into()));
     }
-    let edges: Vec<Edge> = lp.segments.iter().map(edge).collect();
-    Ok(Wire::from_edges(&edges))
+    let mut data = vec![(1 + profile.holes.len()) as f64];
+    encode_loop(&profile.outer, &mut data);
+    for h in &profile.holes {
+        encode_loop(h, &mut data);
+    }
+    safe::profile_face(&data).map_err(err)
 }
 
-/// Polylines of every edge of `shape`.
+/// Polylines of every edge of `shape`, in `shape.edges()` order.
 fn edge_polylines(shape: &Shape) -> Vec<Vec<Vec3>> {
     shape.edges().map(|e| e.approximation_segments().map(a).collect()).collect()
+}
+
+/// Index (in `shape.faces()` order) of the face matched by `face`.
+fn face_index(shape: &Shape, face: &FaceRef) -> Result<(u32, safe::FaceHit), KernelError> {
+    safe::find_face(shape, v(face.point), v(face.normal))
+        .map(|h| (h.index, h))
+        .ok_or_else(|| KernelError("the face no longer exists – re-pick it".into()))
 }
 
 impl Kernel for OcctKernel {
     type Solid = Rc<Shape>;
 
-    fn extrude(
-        &self,
-        profile: &PlacedProfile,
-        dist: f64,
-        symmetric: bool,
-    ) -> Result<Self::Solid, KernelError> {
-        let mut outer = wire(&profile.outer)?;
-        let mut holes = profile.holes.iter().map(wire).collect::<Result<Vec<_>, _>>()?;
+    fn extrude(&self, profile: &PlacedProfile, dist: f64, symmetric: bool) -> Result<Self::Solid, KernelError> {
+        let mut face = profile_face(profile)?;
         if symmetric {
-            let back = v(scale(profile.normal, -dist * 0.5));
-            outer = outer.translate(back);
-            holes = holes.iter().map(|h| h.translate(back)).collect();
+            face = safe::translate(&face, v(scale(profile.normal, -dist * 0.5))).map_err(err)?;
         }
-        let face = Face::from_wire_with_holes(&outer, &holes);
-        let solid = face.extrude(v(scale(profile.normal, dist)));
-        Ok(Rc::new(Shape::from(solid)))
+        let solid = safe::prism(&face, v(scale(profile.normal, dist))).map_err(err)?;
+        Ok(Rc::new(solid))
     }
 
     fn revolve(
@@ -80,25 +114,18 @@ impl Kernel for OcctKernel {
         axis_dir: Vec3,
         angle: f64,
     ) -> Result<Self::Solid, KernelError> {
-        let outer = wire(&profile.outer)?;
-        let holes = profile.holes.iter().map(wire).collect::<Result<Vec<_>, _>>()?;
-        let face = Face::from_wire_with_holes(&outer, &holes);
-        let solid = face.revolve(v(axis_origin), v(axis_dir), Some(Angle::Radians(angle)));
-        Ok(Rc::new(Shape::from(solid)))
+        let face = profile_face(profile)?;
+        let solid = safe::revolve(&face, v(axis_origin), v(axis_dir), angle).map_err(err)?;
+        Ok(Rc::new(solid))
     }
 
-    fn boolean(
-        &self,
-        op: BooleanOp,
-        a: &Self::Solid,
-        b: &Self::Solid,
-    ) -> Result<Self::Solid, KernelError> {
-        let result = match op {
-            BooleanOp::Union => a.union(b),
-            BooleanOp::Subtract => a.subtract(b),
-            BooleanOp::Intersect => a.intersect(b),
+    fn boolean(&self, op: BooleanOp, a: &Self::Solid, b: &Self::Solid) -> Result<Self::Solid, KernelError> {
+        let op = match op {
+            BooleanOp::Union => BoolOp::Union,
+            BooleanOp::Subtract => BoolOp::Subtract,
+            BooleanOp::Intersect => BoolOp::Intersect,
         };
-        Ok(Rc::new(result.shape))
+        Ok(Rc::new(safe::boolean(a, b, op).map_err(err)?))
     }
 
     fn fillet(
@@ -109,12 +136,8 @@ impl Kernel for OcctKernel {
         chamfer: bool,
     ) -> Result<Self::Solid, KernelError> {
         // Match each reference to the nearest edge by midpoint. The explorer
-        // visits shared edges once per face, so de-duplicate by index.
-        let edges: Vec<Edge> = solid.edges().collect();
-        let mids: Vec<Option<Vec3>> = edges
-            .iter()
-            .map(|e| polyline_midpoint(&e.approximation_segments().map(a).collect::<Vec<_>>()))
-            .collect();
+        // visits shared edges once per face, so de-duplicate by midpoint.
+        let mids: Vec<Option<Vec3>> = edge_polylines(solid).iter().map(|pl| polyline_midpoint(pl)).collect();
         let mut picked: Vec<usize> = Vec::new();
         for r in refs {
             let best = mids
@@ -123,20 +146,82 @@ impl Kernel for OcctKernel {
                 .filter_map(|(i, m)| m.map(|m| (i, distance(m, r.point))))
                 .min_by(|x, y| x.1.total_cmp(&y.1))
                 .ok_or_else(|| KernelError("solid has no edges".into()))?;
-            // The same edge is seen twice (once per adjacent face); identical
-            // midpoints mean it is already picked.
             let m = mids[best.0].expect("filtered above");
             if !picked.iter().any(|&p| mids[p].is_some_and(|q| distance(q, m) < 1e-9)) {
                 picked.push(best.0);
             }
         }
-        let chosen: Vec<&Edge> = picked.iter().map(|&i| &edges[i]).collect();
-        let shape = if chamfer {
-            solid.chamfer_edges(radius, chosen)
-        } else {
-            solid.fillet_edges(radius, chosen)
+        let indices: Vec<u32> = picked.iter().map(|&i| i as u32).collect();
+        Ok(Rc::new(safe::fillet(solid, &indices, radius, chamfer).map_err(err)?))
+    }
+
+    fn extrude_face(&self, solid: &Self::Solid, face: &FaceRef, distance: f64) -> Result<Self::Solid, KernelError> {
+        let (index, hit) = face_index(solid, face)?;
+        if !hit.planar {
+            return Err(KernelError("only flat faces can be pushed or pulled".into()));
+        }
+        let f = safe::face(solid, index).map_err(err)?;
+        let tool = safe::prism(&f, hit.normal.normalize() * distance).map_err(err)?;
+        Ok(Rc::new(tool))
+    }
+
+    fn shell(&self, solid: &Self::Solid, faces: &[FaceRef], thickness: f64) -> Result<Self::Solid, KernelError> {
+        let mut indices = Vec::new();
+        for f in faces {
+            let (i, _) = face_index(solid, f)?;
+            if !indices.contains(&i) {
+                indices.push(i);
+            }
+        }
+        Ok(Rc::new(safe::shell(solid, &indices, thickness).map_err(err)?))
+    }
+
+    fn transform(&self, solid: &Self::Solid, t: &Transform) -> Result<Self::Solid, KernelError> {
+        let shape = match *t {
+            Transform::Translate(by) => safe::translate(solid, v(by)),
+            Transform::Rotate { origin, axis, angle } => safe::rotate(solid, v(origin), v(axis), angle),
+            Transform::Mirror { origin, normal } => safe::mirror(solid, v(origin), v(normal)),
         };
-        Ok(Rc::new(shape))
+        Ok(Rc::new(shape.map_err(err)?))
+    }
+
+    fn loft(&self, sections: &[Loop3]) -> Result<Self::Solid, KernelError> {
+        let mut data = vec![sections.len() as f64];
+        for s in sections {
+            encode_loop(s, &mut data);
+        }
+        Ok(Rc::new(safe::loft(&data).map_err(err)?))
+    }
+
+    fn sweep(&self, profile: &PlacedProfile, path: &[Seg3]) -> Result<Self::Solid, KernelError> {
+        let face = profile_face(profile)?;
+        let mut data = Vec::new();
+        encode_loop(&Loop3 { segments: path.to_vec() }, &mut data);
+        Ok(Rc::new(safe::sweep(&face, &data).map_err(err)?))
+    }
+
+    fn find_face(&self, solid: &Self::Solid, face: &FaceRef) -> Option<FaceInfo> {
+        safe::find_face(solid, v(face.point), v(face.normal)).map(|h| FaceInfo {
+            point: a(h.point),
+            normal: a(h.normal),
+            planar: h.planar,
+        })
+    }
+
+    fn is_empty(&self, solid: &Self::Solid) -> bool {
+        safe::solid_count(solid) == 0
+    }
+
+    fn properties(&self, solid: &Self::Solid) -> Option<MassProperties> {
+        safe::properties(solid).map(|(volume, area, c)| MassProperties { volume, area, center: a(c) })
+    }
+
+    fn import_step(&self, path: &Path) -> Result<Vec<Self::Solid>, KernelError> {
+        if !path.exists() {
+            return Err(KernelError(format!("file not found: {}", path.display())));
+        }
+        let shape = safe::read_step(&path.to_string_lossy()).map_err(err)?;
+        Ok(safe::solids(&shape).map_err(err)?.into_iter().map(Rc::new).collect())
     }
 
     fn tessellate(&self, solid: &Self::Solid, tolerance: f64) -> Result<TriMesh, KernelError> {
@@ -159,5 +244,243 @@ impl Kernel for OcctKernel {
 
     fn export_stl(&self, solid: &Self::Solid, path: &Path) -> Result<(), KernelError> {
         solid.write_stl(path).map_err(|e| KernelError(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrocad_model::Plane;
+
+    fn rect(w: f64, h: f64) -> PlacedProfile {
+        let plane = Plane::XY;
+        let c = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]].map(|uv| plane.to_world(uv));
+        let segments = (0..4).map(|i| Seg3::Line { a: c[i], b: c[(i + 1) % 4] }).collect();
+        PlacedProfile { outer: Loop3 { segments }, holes: vec![], normal: plane.normal() }
+    }
+
+    fn volume(k: &OcctKernel, s: &Rc<Shape>) -> f64 {
+        k.properties(s).unwrap().volume
+    }
+
+    #[test]
+    fn box_operations() {
+        let k = OcctKernel::new();
+        let b = k.extrude(&rect(10.0, 20.0), 5.0, false).unwrap();
+        assert!((volume(&k, &b) - 1000.0).abs() < 1e-6);
+
+        // A huge fillet is an error, not an abort.
+        let edge = EdgeRef { point: [5.0, 0.0, 5.0] };
+        assert!(k.fillet(&b, &[edge], 50.0, false).is_err());
+        let f = k.fillet(&b, &[edge], 1.0, false).unwrap();
+        assert!(volume(&k, &f) < 1000.0);
+
+        let top = FaceRef { point: [5.0, 5.0, 5.0], normal: [0.0, 0.0, 1.0] };
+        let info = k.find_face(&b, &top).unwrap();
+        assert!(info.planar && (info.point[2] - 5.0).abs() < 1e-9);
+        // Found again after the face moved along its normal.
+        let taller = k.extrude(&rect(10.0, 20.0), 8.0, false).unwrap();
+        assert!((k.find_face(&taller, &top).unwrap().point[2] - 8.0).abs() < 1e-9);
+
+        let tool = k.extrude_face(&b, &top, 3.0).unwrap();
+        let pulled = k.boolean(BooleanOp::Union, &b, &tool).unwrap();
+        assert!((volume(&k, &pulled) - 1600.0).abs() < 1e-6);
+
+        let shelled = k.shell(&b, &[top], 1.0).unwrap();
+        assert!((volume(&k, &shelled) - (1000.0 - 8.0 * 18.0 * 4.0)).abs() < 1e-3);
+
+        let moved = k.transform(&b, &Transform::Translate([100.0, 0.0, 0.0])).unwrap();
+        assert!(k.is_empty(&k.boolean(BooleanOp::Intersect, &b, &moved).unwrap()));
+        let mirrored = k.transform(&b, &Transform::Mirror { origin: [0.0; 3], normal: [1.0, 0.0, 0.0] }).unwrap();
+        assert!((volume(&k, &mirrored) - 1000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn step_roundtrip_keeps_every_solid() {
+        let k = OcctKernel::new();
+        let a = k.extrude(&rect(10.0, 20.0), 5.0, false).unwrap();
+        let b = k.transform(&a, &Transform::Translate([50.0, 0.0, 0.0])).unwrap();
+        let path = std::env::temp_dir().join("ferrocad_roundtrip.step");
+        k.export_step(&[a, b], &path).unwrap();
+        let back = k.import_step(&path).unwrap();
+        assert_eq!(back.len(), 2);
+        for s in &back {
+            assert!((volume(&k, s) - 1000.0).abs() < 1e-3);
+        }
+        assert!(k.import_step(std::path::Path::new("/nonexistent.step")).is_err());
+        let garbage = std::env::temp_dir().join("ferrocad_garbage.step");
+        std::fs::write(&garbage, "not a step file").unwrap();
+        assert!(k.import_step(&garbage).is_err());
+    }
+
+    #[test]
+    fn loft_and_sweep() {
+        let k = OcctKernel::new();
+        let low = rect(10.0, 10.0).outer;
+        let high = Loop3 {
+            segments: vec![Seg3::Circle { center: [5.0, 5.0, 20.0], normal: [0.0, 0.0, 1.0], radius: 3.0 }],
+        };
+        let loft = k.loft(&[low, high]).unwrap();
+        assert!(volume(&k, &loft) > 0.0);
+
+        let path = [
+            Seg3::Line { a: [5.0, 5.0, 0.0], b: [5.0, 5.0, 30.0] },
+            Seg3::Line { a: [5.0, 5.0, 30.0], b: [25.0, 5.0, 30.0] },
+        ];
+        let circle = PlacedProfile {
+            outer: Loop3 {
+                segments: vec![Seg3::Circle { center: [5.0, 5.0, 0.0], normal: [0.0, 0.0, 1.0], radius: 2.0 }],
+            },
+            holes: vec![],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let swept = k.sweep(&circle, &path).unwrap();
+        assert!(volume(&k, &swept) > 0.0);
+    }
+
+    #[test]
+    fn spline_profile_extrudes_smoothly() {
+        let k = OcctKernel::new();
+        let mut sk = ferrocad_sketch::Sketch::new();
+        sk.add_spline(&[[0.0, 0.0], [20.0, -5.0], [30.0, 10.0], [10.0, 20.0], [0.0, 0.0]]);
+        sk.add_line([15.0, -30.0], [15.0, 40.0]);
+        let profiles = ferrocad_sketch::find_profiles(&sk);
+        assert_eq!(profiles.len(), 2);
+        let mut total = 0.0;
+        for p in &profiles {
+            let placed = PlacedProfile::new(p, &Plane::XY);
+            let solid = k.extrude(&placed, 5.0, false).unwrap();
+            let v = volume(&k, &solid);
+            // Smooth B-spline faces: volume matches the sampled area closely.
+            assert!((v - 5.0 * p.area()).abs() < 0.01 * v, "{v} vs {}", 5.0 * p.area());
+            // One spline edge per region, not dozens of facets.
+            assert!(k.edges(&solid).len() < 20, "{} edges", k.edges(&solid).len());
+            total += v;
+        }
+        assert!(total > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod hole_tests {
+    use super::*;
+    use ferrocad_model::*;
+
+    #[test]
+    fn counterbore_and_countersink_cut_real_solids() {
+        let k = OcctKernel::new();
+        let mut doc = Document::new();
+        let mut sf = SketchFeature::new(Plane::XY);
+        sf.sketch.add_rectangle([0.0, 0.0], [40.0, 20.0]);
+        let s = doc.add("Sketch1", FeatureKind::Sketch(sf));
+        doc.add(
+            "Extrude1",
+            FeatureKind::Extrude(ExtrudeFeature {
+                sketch: s,
+                profile_point: [1.0, 1.0],
+                distance: "10".into(),
+                symmetric: false,
+                operation: Operation::NewBody,
+            }),
+        );
+        let face = |x: f64| FaceRef { point: [x, 10.0, 10.0], normal: [0.0, 0.0, 1.0] };
+        doc.add(
+            "Hole1",
+            FeatureKind::Hole(HoleFeature {
+                face: face(10.0),
+                diameter: "4".into(),
+                depth: "0".into(),
+                through: true,
+                head: HoleHead::Counterbore { diameter: "8".into(), depth: "3".into() },
+            }),
+        );
+        doc.add(
+            "Hole2",
+            FeatureKind::Hole(HoleFeature {
+                face: face(30.0),
+                diameter: "4".into(),
+                depth: "0".into(),
+                through: true,
+                head: HoleHead::Countersink { diameter: "8".into(), angle: "90".into() },
+            }),
+        );
+        let m = doc.rebuild(&k);
+        assert!(m.errors().next().is_none(), "{:?}", m.errors().collect::<Vec<_>>());
+        let v = k.properties(&m.bodies[0].solid).unwrap().volume;
+        let pi = std::f64::consts::PI;
+        let through = pi * 4.0 * 10.0;
+        let counterbore = pi * (16.0 - 4.0) * 3.0;
+        // Countersink cone (r 4 → 2 over 2 mm) minus the part inside the hole.
+        let cone = pi * 2.0 / 3.0 * (16.0 + 8.0 + 4.0) - pi * 4.0 * 2.0;
+        let expected = 40.0 * 20.0 * 10.0 - 2.0 * through - counterbore - cone;
+        assert!((v - expected).abs() < 0.5, "{v} vs {expected}");
+    }
+}
+
+#[cfg(test)]
+mod joint_tests {
+    use super::*;
+    use ferrocad_model::*;
+
+    #[test]
+    fn pin_joins_hole_on_circular_edges() {
+        let k = OcctKernel::new();
+        let mut doc = Document::new();
+        let mut plate = SketchFeature::new(Plane::XY);
+        plate.sketch.add_rectangle([0.0, 0.0], [40.0, 20.0]);
+        plate.sketch.add_circle([10.0, 10.0], 3.0);
+        let s1 = doc.add("Plate", FeatureKind::Sketch(plate));
+        doc.add(
+            "Extrude1",
+            FeatureKind::Extrude(ExtrudeFeature {
+                sketch: s1,
+                profile_point: [1.0, 1.0],
+                distance: "5".into(),
+                symmetric: false,
+                operation: Operation::NewBody,
+            }),
+        );
+        let mut pin = SketchFeature::new(Plane::XY);
+        pin.sketch.add_circle([80.0, 50.0], 3.0);
+        let s2 = doc.add("Pin", FeatureKind::Sketch(pin));
+        doc.add(
+            "Extrude2",
+            FeatureKind::Extrude(ExtrudeFeature {
+                sketch: s2,
+                profile_point: [80.0, 50.0],
+                distance: "15".into(),
+                symmetric: false,
+                operation: Operation::NewBody,
+            }),
+        );
+        // Bottom edge of the pin onto the top edge of the hole.
+        let pin_bottom = EdgeRef { point: [83.0, 50.0, 0.0] };
+        let hole_top = EdgeRef { point: [13.0, 10.0, 5.0] };
+        let m0 = doc.rebuild(&k);
+        let mid = |m: &Model<Rc<Shape>>, p: [f64; 3]| {
+            m.bodies.iter().flat_map(|b| k.edges(&b.solid)).filter_map(|e| polyline_midpoint(&e)).min_by(|a, b| {
+                ferrocad_model::geom::distance(*a, p).total_cmp(&ferrocad_model::geom::distance(*b, p))
+            })
+        };
+        let from = EdgeRef { point: mid(&m0, pin_bottom.point).unwrap() };
+        let to = EdgeRef { point: mid(&m0, hole_top.point).unwrap() };
+        doc.add(
+            "Joint1",
+            FeatureKind::Joint(JointFeature {
+                moving: vec!["Body2".into()],
+                from: JointOrigin::Edge(from),
+                to: JointOrigin::Edge(to),
+                kind: JointKind::Rigid,
+                angle: "0".into(),
+                offset: "0".into(),
+                flip: false,
+            }),
+        );
+        let m = doc.rebuild(&k);
+        assert!(m.errors().next().is_none(), "{:?}", m.errors().collect::<Vec<_>>());
+        let c = k.properties(&m.bodies[1].solid).unwrap().center;
+        assert!((c[0] - 10.0).abs() < 1e-6 && (c[1] - 10.0).abs() < 1e-6, "pin centre {c:?}");
+        // The pin's bottom sits on the hole's top edge plane (z = 5), pointing one way or the other.
+        assert!(((c[2] - 12.5).abs() < 1e-6) || ((c[2] + 2.5).abs() < 1e-6), "{c:?}");
     }
 }

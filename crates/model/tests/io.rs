@@ -88,3 +88,14 @@ fn damaged_references_are_errors_not_panics() {
     let err = io::load(&broken).unwrap_err();
     assert!(err.0.contains("Sketch1"), "{err}");
 }
+
+#[test]
+fn view_state_roundtrips_and_is_optional() {
+    let mut doc = Document::new();
+    doc.view.hidden_bodies = vec!["Body2".into()];
+    doc.view.hidden_features = vec![FeatureId(3)];
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(back.view, doc.view);
+    let old = r#"{"format":"ferrocad","version":1,"params":[],"marker":0,"next_id":0,"features":[]}"#;
+    assert_eq!(io::load(old).unwrap().view, ViewState::default());
+}

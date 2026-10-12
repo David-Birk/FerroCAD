@@ -1,0 +1,242 @@
+{
+  "format": "ferrocad",
+  "version": 1,
+  "params": [
+    {
+      "name": "width",
+      "expression": "60 mm",
+      "comment": ""
+    },
+    {
+      "name": "depth",
+      "expression": "40 mm",
+      "comment": ""
+    },
+    {
+      "name": "thickness",
+      "expression": "10 mm",
+      "comment": ""
+    }
+  ],
+  "marker": 9,
+  "next_id": 9,
+  "features": [
+    {
+      "id": 1,
+      "name": "Sketch1",
+      "suppressed": false,
+      "type": "sketch",
+      "plane": {
+        "origin": [0, 0, 0],
+        "x_axis": [1, 0, 0],
+        "y_axis": [0, 1, 0]
+      },
+      "driven": [
+        {
+          "constraint": 4,
+          "expression": "width"
+        },
+        {
+          "constraint": 5,
+          "expression": "depth"
+        }
+      ],
+      "sketch": {
+        "params": [0, 0, 60, 0, 60, 40, 0, 40],
+        "fixed": [true, true, false, false, false, false, false, false],
+        "points": [
+          [0, 1],
+          [2, 3],
+          [4, 5],
+          [6, 7]
+        ],
+        "entities": [
+          {
+            "type": "line",
+            "a": 0,
+            "b": 1,
+            "construction": false,
+            "alive": true
+          },
+          {
+            "type": "line",
+            "a": 1,
+            "b": 2,
+            "construction": false,
+            "alive": true
+          },
+          {
+            "type": "line",
+            "a": 2,
+            "b": 3,
+            "construction": false,
+            "alive": true
+          },
+          {
+            "type": "line",
+            "a": 3,
+            "b": 0,
+            "construction": false,
+            "alive": true
+          }
+        ],
+        "constraints": [
+          {
+            "type": "horizontal",
+            "entities": [0]
+          },
+          {
+            "type": "horizontal",
+            "entities": [2]
+          },
+          {
+            "type": "vertical",
+            "entities": [3]
+          },
+          {
+            "type": "vertical",
+            "entities": [1]
+          },
+          {
+            "type": "length",
+            "entities": [0],
+            "value": 60
+          },
+          {
+            "type": "length",
+            "entities": [1],
+            "value": 40
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "name": "Extrude1",
+      "suppressed": false,
+      "type": "extrude",
+      "sketch": 1,
+      "profile_point": [1, 1],
+      "distance": "thickness",
+      "symmetric": false,
+      "operation": "new_body"
+    },
+    {
+      "id": 3,
+      "name": "Fillet1",
+      "suppressed": false,
+      "type": "fillet",
+      "edges": [
+        [0, 0, 5],
+        [60, 0, 5],
+        [60, 40, 5],
+        [0, 40, 5]
+      ],
+      "radius": "6 mm",
+      "chamfer": false
+    },
+    {
+      "id": 4,
+      "name": "Sketch2",
+      "suppressed": false,
+      "type": "sketch",
+      "plane": {
+        "origin": [0, 0, 10],
+        "x_axis": [1, 0, 0],
+        "y_axis": [0, 1, 0]
+      },
+      "attach": {
+        "face": {
+          "point": [30, 20, 10],
+          "normal": [0, 0, 1]
+        }
+      },
+      "driven": [],
+      "sketch": {
+        "params": [15, 20, 7],
+        "fixed": [false, false, false],
+        "points": [
+          [0, 1]
+        ],
+        "entities": [
+          {
+            "type": "circle",
+            "center": 0,
+            "radius": 2,
+            "construction": false,
+            "alive": true
+          }
+        ],
+        "constraints": []
+      }
+    },
+    {
+      "id": 5,
+      "name": "Extrude2",
+      "suppressed": false,
+      "type": "extrude",
+      "sketch": 4,
+      "profile_point": [15, 20],
+      "distance": "12 mm",
+      "symmetric": false,
+      "operation": "join"
+    },
+    {
+      "id": 6,
+      "name": "Hole1",
+      "suppressed": false,
+      "type": "hole",
+      "face": {
+        "point": [15, 20, 22],
+        "normal": [0, 0, 1]
+      },
+      "diameter": "6 mm",
+      "depth": "0",
+      "through": true
+    },
+    {
+      "id": 7,
+      "name": "Hole2",
+      "suppressed": false,
+      "type": "hole",
+      "face": {
+        "point": [45, 10, 10],
+        "normal": [0, 0, 1]
+      },
+      "diameter": "4 mm",
+      "depth": "6 mm",
+      "through": false,
+      "countersink": {
+        "diameter": "8 mm",
+        "angle": "90"
+      }
+    },
+    {
+      "id": 8,
+      "name": "Chamfer1",
+      "suppressed": false,
+      "type": "fillet",
+      "edges": [
+        [30, 0, 10]
+      ],
+      "radius": "2 mm",
+      "chamfer": true
+    },
+    {
+      "id": 9,
+      "name": "Plane1",
+      "suppressed": false,
+      "type": "plane",
+      "base": {
+        "origin": "XY"
+      },
+      "offset": "30 mm",
+      "angle": "0"
+    }
+  ],
+  "view": {
+    "hidden_bodies": [],
+    "appearances": [],
+    "hidden_features": []
+  }
+}

@@ -130,3 +130,54 @@ fn tangent_circle_inside_square() {
     assert!(close(total, 100.0), "regions must tile the square: {a:?}");
     assert!(a.iter().any(|x| close(*x, PI * 25.0)));
 }
+
+#[test]
+fn closed_spline_is_one_smooth_profile() {
+    let mut sk = Sketch::new();
+    let fit = [[0.0, 0.0], [10.0, -2.0], [14.0, 8.0], [3.0, 12.0], [0.0, 0.0]];
+    sk.add_spline(&fit);
+    let profiles = find_profiles(&sk);
+    assert_eq!(profiles.len(), 1);
+    let segs = &profiles[0].outer.segments;
+    assert_eq!(segs.len(), 1, "pieces merged into one spline: {}", segs.len());
+    assert!(matches!(segs[0], ferrocad_sketch::Segment::Spline { .. }));
+    assert!(profiles[0].area() > 50.0);
+    // The curve passes through its fit points.
+    let pts = sk.spline_points(ferrocad_sketch::EntityId(0), 12);
+    for f in &fit {
+        assert!(pts.iter().any(|p| (p[0] - f[0]).hypot(p[1] - f[1]) < 1e-9), "{f:?}");
+    }
+}
+
+#[test]
+fn line_across_spline_makes_two_regions() {
+    let mut sk = Sketch::new();
+    sk.add_spline(&[[0.0, 0.0], [10.0, -3.0], [20.0, 0.0], [10.0, 10.0], [0.0, 0.0]]);
+    sk.add_line([10.0, -20.0], [10.0, 30.0]);
+    let profiles = find_profiles(&sk);
+    assert_eq!(profiles.len(), 2);
+    for p in &profiles {
+        let kinds: Vec<bool> = p.outer.segments.iter().map(|s| matches!(s, ferrocad_sketch::Segment::Spline { .. })).collect();
+        assert_eq!(kinds.iter().filter(|k| **k).count(), 1, "one spline piece per region: {kinds:?}");
+        assert_eq!(kinds.len(), 2, "spline piece + line piece");
+    }
+    let total: f64 = profiles.iter().map(|p| p.area()).sum();
+    let whole = {
+        let mut only = Sketch::new();
+        only.add_spline(&[[0.0, 0.0], [10.0, -3.0], [20.0, 0.0], [10.0, 10.0], [0.0, 0.0]]);
+        find_profiles(&only)[0].area()
+    };
+    assert!((total - whole).abs() < 1e-6 * whole, "{total} vs {whole}");
+}
+
+#[test]
+fn spline_points_drag_and_survive_data_roundtrip() {
+    let mut sk = Sketch::new();
+    let s = sk.add_spline(&[[0.0, 0.0], [5.0, 5.0], [10.0, 0.0]]);
+    let mid = sk.entity(s).points()[1];
+    sk.drag_point(mid, [5.0, 8.0]).unwrap();
+    let pts = sk.spline_points(s, 8);
+    assert!(pts.iter().any(|p| (p[1] - 8.0).abs() < 1e-9));
+    let back = Sketch::from_data(sk.to_data()).unwrap();
+    assert_eq!(back.to_data(), sk.to_data());
+}

@@ -31,6 +31,8 @@ pub enum Seg3 {
     Arc { start: Vec3, mid: Vec3, end: Vec3 },
     /// Orientation follows the right-hand rule around `normal`.
     Circle { center: Vec3, normal: Vec3, radius: f64 },
+    /// Smooth curve interpolating the points, in order.
+    Spline { points: Vec<Vec3> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,6 +57,9 @@ impl PlacedProfile {
                 .segments
                 .iter()
                 .map(|s| match *s {
+                    Segment::Spline { ref points } => {
+                        Seg3::Spline { points: points.iter().map(|p| plane.to_world(*p)).collect() }
+                    }
                     Segment::Line { a, b } => Seg3::Line { a: plane.to_world(a), b: plane.to_world(b) },
                     Segment::Arc { from, to, .. } => Seg3::Arc {
                         start: plane.to_world(from),
@@ -83,6 +88,40 @@ impl PlacedProfile {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeRef {
     pub point: Vec3,
+}
+
+/// Picks a face by a point on it and its outward normal. On rebuild the face
+/// is found again along the line through `point` in the `normal` direction,
+/// so it survives the face moving along its normal (e.g. a changed extrude
+/// distance).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceRef {
+    pub point: Vec3,
+    pub normal: Vec3,
+}
+
+/// What a kernel knows about a face it found for a [`FaceRef`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceInfo {
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub planar: bool,
+}
+
+/// A rigid motion or reflection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Transform {
+    Translate(Vec3),
+    /// Right-hand rule around the axis, radians.
+    Rotate { origin: Vec3, axis: Vec3, angle: f64 },
+    Mirror { origin: Vec3, normal: Vec3 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MassProperties {
+    pub volume: f64,
+    pub area: f64,
+    pub center: Vec3,
 }
 
 /// Midpoint (by arc length) of a polyline – how edges are matched to
@@ -154,6 +193,32 @@ pub trait Kernel {
         radius: f64,
         chamfer: bool,
     ) -> Result<Self::Solid, KernelError>;
+
+    /// Tool solid made by moving the face matched by `face` along its outward
+    /// normal by `distance` (negative: into the body).
+    fn extrude_face(&self, solid: &Self::Solid, face: &FaceRef, distance: f64) -> Result<Self::Solid, KernelError>;
+
+    /// Hollow the solid with walls `thickness` thick, removing `faces`.
+    fn shell(&self, solid: &Self::Solid, faces: &[FaceRef], thickness: f64) -> Result<Self::Solid, KernelError>;
+
+    fn transform(&self, solid: &Self::Solid, t: &Transform) -> Result<Self::Solid, KernelError>;
+
+    /// Solid through closed sections, in order.
+    fn loft(&self, sections: &[Loop3]) -> Result<Self::Solid, KernelError>;
+
+    /// Sweep a profile along a connected path.
+    fn sweep(&self, profile: &PlacedProfile, path: &[Seg3]) -> Result<Self::Solid, KernelError>;
+
+    /// The face of `solid` matched by `face`, if any.
+    fn find_face(&self, solid: &Self::Solid, face: &FaceRef) -> Option<FaceInfo>;
+
+    /// True if a boolean left nothing.
+    fn is_empty(&self, solid: &Self::Solid) -> bool;
+
+    fn properties(&self, solid: &Self::Solid) -> Option<MassProperties>;
+
+    /// Solids of a STEP file.
+    fn import_step(&self, path: &Path) -> Result<Vec<Self::Solid>, KernelError>;
 
     fn tessellate(&self, solid: &Self::Solid, tolerance: f64) -> Result<TriMesh, KernelError>;
 

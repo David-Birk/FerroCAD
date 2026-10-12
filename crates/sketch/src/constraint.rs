@@ -19,6 +19,8 @@ pub enum Constraint {
     /// Line tangent to a circle or arc.
     Tangent(EntityId, EntityId),
     Concentric(EntityId, EntityId),
+    /// The two points mirror each other at the line.
+    Symmetric(PointId, PointId, EntityId),
 
     // --- dimensions ------------------------------------------------------
     Distance(PointId, PointId, f64),
@@ -31,6 +33,8 @@ pub enum Constraint {
     Diameter(EntityId, f64),
     /// Angle from line 1 to line 2, counter-clockwise.
     Angle(EntityId, EntityId, f64),
+    /// Perpendicular distance from a point to a line (infinite extension).
+    PointLineDistance(PointId, EntityId, f64),
 }
 
 impl Constraint {
@@ -47,7 +51,8 @@ impl Constraint {
             | VerticalDistance(_, _, v)
             | Radius(_, v)
             | Diameter(_, v)
-            | Angle(_, _, v) => Some(v),
+            | Angle(_, _, v)
+            | PointLineDistance(_, _, v) => Some(v),
             _ => None,
         }
     }
@@ -61,7 +66,8 @@ impl Constraint {
             | VerticalDistance(_, _, v)
             | Radius(_, v)
             | Diameter(_, v)
-            | Angle(_, _, v) => Some(v),
+            | Angle(_, _, v)
+            | PointLineDistance(_, _, v) => Some(v),
             _ => None,
         }
     }
@@ -70,7 +76,8 @@ impl Constraint {
         use Constraint::*;
         match *self {
             Horizontal(e) | Vertical(e) | Length(e, _) | Radius(e, _) | Diameter(e, _) => vec![e],
-            PointOnLine(_, e) | PointOnCircle(_, e) | Midpoint(_, e) => vec![e],
+            PointOnLine(_, e) | PointOnCircle(_, e) | Midpoint(_, e) | Symmetric(_, _, e) => vec![e],
+            PointLineDistance(_, e, _) => vec![e],
             Parallel(a, b)
             | Perpendicular(a, b)
             | Equal(a, b)
@@ -90,7 +97,8 @@ impl Constraint {
             | Distance(a, b, _)
             | HorizontalDistance(a, b, _)
             | VerticalDistance(a, b, _) => vec![a, b],
-            PointOnLine(p, _) | PointOnCircle(p, _) | Midpoint(p, _) => vec![p],
+            PointOnLine(p, _) | PointOnCircle(p, _) | Midpoint(p, _) | PointLineDistance(p, _, _) => vec![p],
+            Symmetric(a, b, _) => vec![a, b],
             _ => vec![],
         }
     }
@@ -109,6 +117,7 @@ impl Constraint {
             Midpoint(..) => "Midpoint",
             Tangent(..) => "Tangent",
             Concentric(..) => "Concentric",
+            Symmetric(..) => "Symmetric",
             Distance(..) => "Distance",
             Length(..) => "Length",
             HorizontalDistance(..) => "Horizontal distance",
@@ -116,6 +125,7 @@ impl Constraint {
             Radius(..) => "Radius",
             Diameter(..) => "Diameter",
             Angle(..) => "Angle",
+            PointLineDistance(..) => "Point–line distance",
         }
     }
 
@@ -181,14 +191,41 @@ impl Constraint {
                 let (l, c) = if sk.line(p, l).is_some() { (l, c) } else { (c, l) };
                 if let (Some((a, b)), Some((center, r))) = (sk.line(p, l), sk.circle(p, c)) {
                     let d = sub(b, a);
-                    let signed = cross(d, sub(center, a)) / norm(d).max(1e-12);
-                    out.push(signed.abs() - r);
+                    // Sharing an end point with an arc: the distance form is
+                    // degenerate at tangency, so require the line to be
+                    // perpendicular to the radius at that point instead.
+                    let shared = match (sk.entity(l), sk.entity(c)) {
+                        (Entity::Line { a: la, b: lb }, Entity::Arc { start, end, .. }) => {
+                            [*la, *lb].into_iter().find(|q| q == start || q == end)
+                        }
+                        _ => None,
+                    };
+                    match shared {
+                        Some(q) => {
+                            let radial = sub(sk.pt(p, q), center);
+                            out.push(dot(d, radial) / (norm(d) * r).max(1e-12));
+                        }
+                        None => {
+                            let signed = cross(d, sub(center, a)) / norm(d).max(1e-12);
+                            out.push(signed.abs() - r);
+                        }
+                    }
                 }
             }
             Concentric(c1, c2) => {
                 if let (Some((a, _)), Some((b, _))) = (sk.circle(p, c1), sk.circle(p, c2)) {
                     out.push(b[0] - a[0]);
                     out.push(b[1] - a[1]);
+                }
+            }
+            Symmetric(a, b, l) => {
+                if let Some((la, lb)) = sk.line(p, l) {
+                    let (qa, qb) = (sk.pt(p, a), sk.pt(p, b));
+                    let d = sub(lb, la);
+                    let n = norm(d).max(1e-12);
+                    let mid = [0.5 * (qa[0] + qb[0]), 0.5 * (qa[1] + qb[1])];
+                    out.push(cross(d, sub(mid, la)) / n);
+                    out.push(dot(d, sub(qb, qa)) / n);
                 }
             }
             Distance(a, b, d) => out.push(dist(sk.pt(p, a), sk.pt(p, b)) - d),
@@ -207,6 +244,13 @@ impl Constraint {
             Diameter(c, d) => {
                 if let Some((_, cr)) = sk.circle(p, c) {
                     out.push(2.0 * cr - d);
+                }
+            }
+            PointLineDistance(pt, l, d) => {
+                if let Some((a, b)) = sk.line(p, l) {
+                    let q = sk.pt(p, pt);
+                    let dir = sub(b, a);
+                    out.push((cross(dir, sub(q, a)) / norm(dir).max(1e-12)).abs() - d);
                 }
             }
             Angle(l1, l2, a) => {

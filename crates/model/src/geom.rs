@@ -69,6 +69,13 @@ impl Plane {
         Plane { origin, x_axis, y_axis }
     }
 
+    /// The plane of a flat face: origin is the world origin projected onto
+    /// it, axes as in [`Plane::from_normal`].
+    pub fn at_face(point: Vec3, normal: Vec3) -> Plane {
+        let n = normalize(normal);
+        Plane::from_normal(scale(n, dot(n, point)), n)
+    }
+
     pub fn normal(&self) -> Vec3 {
         normalize(cross(self.x_axis, self.y_axis))
     }

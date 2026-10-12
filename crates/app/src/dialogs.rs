@@ -1,15 +1,22 @@
-//! Extrude / fillet / parameter dialogs and their viewport picking.
+//! Command dialogs (extrude, revolve, fillet/chamfer, parameters) and their
+//! viewport picking. Dialogs float at the right of the viewport like Fusion's,
+//! with OK (Enter) / Cancel (Esc); extrude and revolve show a live preview.
 
 use crate::app::{FerroApp, Mode};
-use egui::{Color32, Stroke};
+use crate::icons::{self, Icon};
+use crate::theme;
+use egui::{Color32, RichText, Stroke, Ui};
 use ferrocad_model::kernel::polyline_midpoint;
 use ferrocad_model::{
-    Document, EdgeRef, ExtrudeFeature, FeatureId, FeatureKind, FilletFeature, Operation,
+    Document, EdgeRef, ExtrudeFeature, FeatureId, FeatureKind, FilletFeature, Operation, ParamTable,
     RevolveAxis, RevolveFeature, SketchFeature,
 };
 use ferrocad_sketch::find_profiles;
 use ferrocad_sketch::profile::profile_at;
 use ferrocad_view::{polyline_screen_distance, Camera, Viewport};
+
+/// An axis as (point, direction).
+type AxisLine = ([f64; 3], [f64; 3]);
 
 const COL_PROFILE: Color32 = Color32::from_rgb(110, 175, 255);
 const COL_PICKED: Color32 = Color32::from_rgb(255, 215, 70);
@@ -19,6 +26,8 @@ pub struct ExtrudeSession {
     pub sketch: Option<FeatureId>,
     pub profile_point: Option<[f64; 2]>,
     pub distance: String,
+    /// Extrude to the other side (stored as a negated distance).
+    pub flip: bool,
     pub symmetric: bool,
     pub operation: Operation,
 }
@@ -31,24 +40,43 @@ impl ExtrudeSession {
             .rev()
             .find(|f| matches!(f.kind, FeatureKind::Sketch(_)))
             .map(|f| f.id);
+        // A sketch on a body face adds to that body by default, like Fusion.
+        let on_face = sketch
+            .and_then(|id| doc.sketch(id))
+            .is_some_and(|s| matches!(s.attach, Some(ferrocad_model::PlaneRef::Face(_))));
         Self {
             editing: None,
             sketch,
             profile_point: None,
             distance: "10 mm".into(),
+            flip: false,
             symmetric: false,
-            operation: Operation::NewBody,
+            operation: if on_face { Operation::Join } else { Operation::NewBody },
         }
     }
 
     pub fn edit(id: FeatureId, e: &ExtrudeFeature) -> Self {
+        let d = e.distance.trim();
+        let (distance, flip) = match d.strip_prefix("-(").and_then(|r| r.strip_suffix(')')) {
+            Some(inner) => (inner.to_string(), true),
+            None => (e.distance.clone(), false),
+        };
         Self {
             editing: Some(id),
             sketch: Some(e.sketch),
             profile_point: Some(e.profile_point),
-            distance: e.distance.clone(),
+            distance,
+            flip,
             symmetric: e.symmetric,
             operation: e.operation,
+        }
+    }
+
+    fn distance_expr(&self) -> String {
+        if self.flip {
+            format!("-({})", self.distance.trim())
+        } else {
+            self.distance.clone()
         }
     }
 }
@@ -67,6 +95,146 @@ impl FilletSession {
 
     pub fn edit(id: FeatureId, f: &FilletFeature) -> Self {
         Self { editing: Some(id), edges: f.edges.clone(), radius: f.radius.clone(), chamfer: f.chamfer }
+    }
+}
+
+/// Replace the edited feature, or add a new one at the marker.
+pub(crate) fn apply_feature(doc: &mut Document, editing: Option<FeatureId>, prefix: &str, kind: FeatureKind) {
+    match editing.and_then(|id| doc.feature_mut(id)) {
+        Some(f) => f.kind = kind,
+        None => {
+            let name = doc.next_name(prefix);
+            doc.add(name, kind);
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub(crate) enum DialogAction {
+    None,
+    Ok,
+    Cancel,
+}
+
+/// Fusion-style command dialog: header with icon and title, a two-column
+/// form, OK/Cancel footer. Enter confirms, Esc cancels.
+pub(crate) fn command_dialog(
+    ctx: &egui::Context,
+    viewport: egui::Rect,
+    title: &str,
+    icon: Icon,
+    ok_enabled: bool,
+    body: impl FnOnce(&mut Ui),
+) -> DialogAction {
+    let mut action = DialogAction::None;
+    egui::Window::new(title)
+        .id(egui::Id::new(("command_dialog", title)))
+        .title_bar(false)
+        .auto_sized()
+        .collapsible(false)
+        .frame(theme::dialog_frame())
+        .pivot(egui::Align2::RIGHT_TOP)
+        .default_pos(viewport.right_top() + egui::vec2(-16.0, 168.0))
+        .show(ctx, |ui| {
+            ui.set_width(300.0);
+            egui::Frame::new()
+                .fill(theme::PANEL)
+                .inner_margin(egui::Margin::symmetric(10, 7))
+                .corner_radius(egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                        icons::paint(ui.painter(), r, icon, theme::ICON, true);
+                        ui.label(RichText::new(title.to_uppercase()).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if icons::icon_button(ui, Icon::Cancel, 18.0, "Cancel (Esc)", true, false).clicked() {
+                                action = DialogAction::Cancel;
+                            }
+                        });
+                    });
+                });
+            egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                egui::Grid::new(("dialog_form", title)).num_columns(2).spacing([12.0, 8.0]).show(ui, body);
+            });
+            ui.separator();
+            egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 2, bottom: 10 }).show(ui, |ui| {
+                // `Align::Min`: a centred cross axis would claim the full window height.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if theme::secondary_button(ui, "Cancel").clicked() {
+                        action = DialogAction::Cancel;
+                    }
+                    if theme::primary_button(ui, "OK", ok_enabled).clicked() {
+                        action = DialogAction::Ok;
+                    }
+                });
+            });
+        });
+    let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+    if action == DialogAction::None {
+        if enter && ok_enabled {
+            action = DialogAction::Ok;
+        } else if esc {
+            action = DialogAction::Cancel;
+        }
+    }
+    action
+}
+
+pub(crate) fn form_label(ui: &mut Ui, text: &str) {
+    ui.label(RichText::new(text).color(theme::TEXT_WEAK));
+}
+
+/// Expression field with its evaluated value or error underneath.
+pub(crate) fn expression_field(ui: &mut Ui, params: &ParamTable, text: &mut String, unit: &str) {
+    ui.vertical(|ui| {
+        ui.add(egui::TextEdit::singleline(text).desired_width(150.0));
+        match params.eval(text) {
+            Ok(v) => ui.weak(format!("= {v:.3} {unit}")),
+            Err(e) => ui.colored_label(theme::ERROR, e.to_string()),
+        };
+    });
+}
+
+fn selection_status(ui: &mut Ui, done: bool, done_text: &str, todo_text: &str) {
+    if done {
+        ui.label(RichText::new(format!("✔ {done_text}")).color(theme::TEXT));
+    } else {
+        egui::Frame::new()
+            .fill(theme::ACCENT_DIM)
+            .corner_radius(4.0)
+            .inner_margin(egui::Margin::symmetric(8, 3))
+            .show(ui, |ui| ui.label(RichText::new(todo_text).color(Color32::WHITE)));
+    }
+}
+
+fn sketch_combo(ui: &mut Ui, id: &str, sketches: &[(FeatureId, String)], current: &mut Option<FeatureId>) -> bool {
+    let mut changed = false;
+    let text = sketches
+        .iter()
+        .find(|(id, _)| Some(*id) == *current)
+        .map(|(_, n)| n.clone())
+        .unwrap_or_else(|| "–".into());
+    egui::ComboBox::from_id_salt(id).selected_text(text).width(150.0).show_ui(ui, |ui| {
+        for (sid, name) in sketches {
+            changed |= ui.selectable_value(current, Some(*sid), name.as_str()).changed();
+        }
+    });
+    changed
+}
+
+fn operation_combo(ui: &mut Ui, id: &str, op: &mut Operation) {
+    egui::ComboBox::from_id_salt(id).selected_text(op.label()).width(150.0).show_ui(ui, |ui| {
+        for o in Operation::ALL {
+            ui.selectable_value(op, o, o.label());
+        }
+    });
+}
+
+fn preview_status(ui: &mut Ui, error: Option<&str>) {
+    if let Some(e) = error {
+        form_label(ui, "");
+        ui.colored_label(theme::ERROR, format!("⚠ {e}"));
+        ui.end_row();
     }
 }
 
@@ -119,14 +287,17 @@ pub fn pick_profile(
 }
 
 impl FerroApp {
+    fn sketches_before_marker(&self) -> Vec<(FeatureId, String)> {
+        self.doc.features()[..self.doc.marker()]
+            .iter()
+            .filter(|f| matches!(f.kind, FeatureKind::Sketch(_)))
+            .map(|f| (f.id, f.name.clone()))
+            .collect()
+    }
+
     // ------------------------------------------------------------- extrude
 
-    pub fn extrude_viewport(
-        &mut self,
-        response: &egui::Response,
-        painter: &egui::Painter,
-        vp: &Viewport,
-    ) {
+    pub fn extrude_viewport(&mut self, response: &egui::Response, painter: &egui::Painter, vp: &Viewport) {
         let cam = self.camera;
         let Mode::Extrude(sess) = &mut self.mode else { return };
         let Some(sf) = sess.sketch.and_then(|id| self.doc.sketch(id)) else { return };
@@ -134,103 +305,85 @@ impl FerroApp {
     }
 
     pub fn extrude_window(&mut self, ctx: &egui::Context) {
-        let mut close = false;
-        let mut commit = false;
-        let sketches: Vec<(FeatureId, String)> = self.doc.features()[..self.doc.marker()]
-            .iter()
-            .filter(|f| matches!(f.kind, FeatureKind::Sketch(_)))
-            .map(|f| (f.id, f.name.clone()))
-            .collect();
+        let sketches = self.sketches_before_marker();
         let params = self.doc.params.clone();
+        let preview_error = self.preview.as_ref().and_then(|p| p.error.clone());
+        let viewport = self.viewport_rect;
         let Mode::Extrude(sess) = &mut self.mode else { return };
+        let ready = sess.sketch.is_some() && sess.profile_point.is_some() && params.eval(&sess.distance).is_ok();
 
-        egui::Window::new("Extrude").default_width(260.0).show(ctx, |ui| {
-            let current = sketches
-                .iter()
-                .find(|(id, _)| Some(*id) == sess.sketch)
-                .map(|(_, n)| n.clone())
-                .unwrap_or_else(|| "–".into());
-            egui::ComboBox::from_label("Sketch").selected_text(current).show_ui(ui, |ui| {
-                for (id, name) in &sketches {
-                    if ui.selectable_value(&mut sess.sketch, Some(*id), name.as_str()).clicked() {
-                        sess.profile_point = None;
-                    }
-                }
-            });
-            if sess.profile_point.is_some() {
-                ui.label("✔ Profile selected (click another to change)");
-            } else {
-                ui.colored_label(COL_PICKED, "Click inside a profile in the viewport");
+        let action = command_dialog(ctx, viewport, "Extrude", Icon::Extrude, ready, |ui| {
+            form_label(ui, "Sketch");
+            if sketch_combo(ui, "extrude_sketch", &sketches, &mut sess.sketch) {
+                sess.profile_point = None;
             }
+            ui.end_row();
+            form_label(ui, "Profile");
+            selection_status(ui, sess.profile_point.is_some(), "1 selected", "Select a profile");
+            ui.end_row();
+            form_label(ui, "Direction");
             ui.horizontal(|ui| {
-                ui.label("Distance");
-                ui.text_edit_singleline(&mut sess.distance);
-            });
-            match params.eval(&sess.distance) {
-                Ok(v) => ui.weak(format!("= {v:.3} mm")),
-                Err(e) => ui.colored_label(Color32::from_rgb(255, 110, 100), e.to_string()),
-            };
-            ui.checkbox(&mut sess.symmetric, "Symmetric");
-            egui::ComboBox::from_label("Operation").selected_text(sess.operation.label()).show_ui(
-                ui,
-                |ui| {
-                    for op in Operation::ALL {
-                        ui.selectable_value(&mut sess.operation, op, op.label());
-                    }
-                },
-            );
-            ui.separator();
-            ui.horizontal(|ui| {
-                let ready = sess.sketch.is_some()
-                    && sess.profile_point.is_some()
-                    && params.eval(&sess.distance).is_ok();
-                if ui.add_enabled(ready, egui::Button::new("OK")).clicked() {
-                    commit = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    close = true;
+                ui.selectable_value(&mut sess.symmetric, false, "One side");
+                ui.selectable_value(&mut sess.symmetric, true, "Symmetric");
+                if !sess.symmetric {
+                    ui.checkbox(&mut sess.flip, "Flip");
                 }
             });
+            ui.end_row();
+            form_label(ui, "Distance");
+            expression_field(ui, &params, &mut sess.distance, "mm");
+            ui.end_row();
+            form_label(ui, "Operation");
+            operation_combo(ui, "extrude_op", &mut sess.operation);
+            ui.end_row();
+            preview_status(ui, preview_error.as_deref());
         });
 
-        if commit {
-            let Mode::Extrude(sess) = std::mem::replace(&mut self.mode, Mode::Model) else { return };
-            let (Some(sketch), Some(profile_point)) = (sess.sketch, sess.profile_point) else { return };
-            let feature = ExtrudeFeature {
+        let feature = match (sess.sketch, sess.profile_point) {
+            (Some(sketch), Some(profile_point)) => Some(ExtrudeFeature {
                 sketch,
                 profile_point,
-                distance: sess.distance,
+                distance: sess.distance_expr(),
                 symmetric: sess.symmetric,
                 operation: sess.operation,
-            };
-            self.checkpoint("Extrude");
-            match sess.editing.and_then(|id| self.doc.feature_mut(id)) {
-                Some(f) => f.kind = FeatureKind::Extrude(feature),
-                None => {
-                    let name = self.doc.next_name("Extrude");
-                    self.doc.add(name, FeatureKind::Extrude(feature));
+            }),
+            _ => None,
+        };
+        let editing = sess.editing;
+        match action {
+            DialogAction::Ok => {
+                let Some(feature) = feature else { return };
+                let sketch = feature.sketch;
+                self.mode = Mode::Model;
+                self.checkpoint("Extrude");
+                apply_feature(&mut self.doc, editing, "Extrude", FeatureKind::Extrude(feature));
+                self.hidden_sketches.insert(sketch);
+                self.finish_body_command();
+            }
+            DialogAction::Cancel => self.cancel(),
+            DialogAction::None => match feature.filter(|_| ready) {
+                Some(f) => {
+                    let key = format!("{editing:?} {f:?}");
+                    self.update_preview(key, |doc| apply_feature(doc, editing, "Extrude", FeatureKind::Extrude(f)));
                 }
-            }
-            let first_body = self.bodies.is_empty();
-            self.message = None;
-            self.rebuild();
-            if first_body {
-                self.camera.set_view(ferrocad_view::ViewPreset::Home);
-                self.fit_view();
-            }
-        } else if close {
-            self.mode = Mode::Model;
+                None => self.preview = None,
+            },
+        }
+    }
+
+    /// After OK in a body-creating dialog: rebuild, and frame the first body.
+    fn finish_body_command(&mut self) {
+        let first_body = self.bodies.is_empty();
+        self.message = None;
+        self.rebuild();
+        if first_body && !self.bodies.is_empty() {
+            self.set_view(ferrocad_view::ViewPreset::Home);
         }
     }
 
     // -------------------------------------------------------------- fillet
 
-    pub fn fillet_viewport(
-        &mut self,
-        response: &egui::Response,
-        painter: &egui::Painter,
-        vp: &Viewport,
-    ) {
+    pub fn fillet_viewport(&mut self, response: &egui::Response, painter: &egui::Painter, vp: &Viewport) {
         let cam = self.camera;
         let Mode::Fillet(sess) = &mut self.mode else { return };
         let pos = response.hover_pos();
@@ -273,9 +426,7 @@ impl FerroApp {
         for r in &sess.edges {
             for body in &self.bodies {
                 for e in &body.edges {
-                    if polyline_midpoint(e)
-                        .is_some_and(|m| ferrocad_model::geom::distance(m, r.point) < 1e-3)
-                    {
+                    if polyline_midpoint(e).is_some_and(|m| ferrocad_model::geom::distance(m, r.point) < 1e-3) {
                         draw(e, COL_PICKED);
                     }
                 }
@@ -284,51 +435,52 @@ impl FerroApp {
     }
 
     pub fn fillet_window(&mut self, ctx: &egui::Context) {
-        let mut close = false;
-        let mut commit = false;
         let params = self.doc.params.clone();
+        let viewport = self.viewport_rect;
+        let preview_error = self.preview.as_ref().and_then(|p| p.error.clone());
         let Mode::Fillet(sess) = &mut self.mode else { return };
-        let title = if sess.chamfer { "Chamfer" } else { "Fillet" };
+        let (title, icon) = if sess.chamfer { ("Chamfer", Icon::Chamfer) } else { ("Fillet", Icon::Fillet) };
+        let ready = !sess.edges.is_empty() && params.eval(&sess.radius).is_ok();
 
-        egui::Window::new(title).default_width(240.0).show(ctx, |ui| {
-            ui.label(format!("{} edge(s) selected – click edges to toggle", sess.edges.len()));
+        let action = command_dialog(ctx, viewport, title, icon, ready, |ui| {
+            form_label(ui, "Edges");
+            let n = sess.edges.len();
+            selection_status(ui, n > 0, &format!("{n} selected"), "Select edges");
+            ui.end_row();
+            form_label(ui, "Type");
             ui.horizontal(|ui| {
-                ui.label(if sess.chamfer { "Distance" } else { "Radius" });
-                ui.text_edit_singleline(&mut sess.radius);
+                ui.selectable_value(&mut sess.chamfer, false, "Fillet");
+                ui.selectable_value(&mut sess.chamfer, true, "Chamfer");
             });
-            match params.eval(&sess.radius) {
-                Ok(v) => ui.weak(format!("= {v:.3} mm")),
-                Err(e) => ui.colored_label(Color32::from_rgb(255, 110, 100), e.to_string()),
-            };
-            ui.checkbox(&mut sess.chamfer, "Chamfer instead of round");
-            ui.separator();
-            ui.horizontal(|ui| {
-                let ready = !sess.edges.is_empty() && params.eval(&sess.radius).is_ok();
-                if ui.add_enabled(ready, egui::Button::new("OK")).clicked() {
-                    commit = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    close = true;
-                }
-            });
+            ui.end_row();
+            form_label(ui, if sess.chamfer { "Distance" } else { "Radius" });
+            expression_field(ui, &params, &mut sess.radius, "mm");
+            ui.end_row();
+            preview_status(ui, preview_error.as_deref());
         });
 
-        if commit {
-            let Mode::Fillet(sess) = std::mem::replace(&mut self.mode, Mode::Model) else { return };
-            let feature = FilletFeature { edges: sess.edges, radius: sess.radius, chamfer: sess.chamfer };
-            self.checkpoint(if feature.chamfer { "Chamfer" } else { "Fillet" });
-            match sess.editing.and_then(|id| self.doc.feature_mut(id)) {
-                Some(f) => f.kind = FeatureKind::Fillet(feature),
-                None => {
-                    let prefix = if feature.chamfer { "Chamfer" } else { "Fillet" };
-                    let name = self.doc.next_name(prefix);
-                    self.doc.add(name, FeatureKind::Fillet(feature));
-                }
+        let preview = ready.then(|| {
+            (sess.editing, FilletFeature { edges: sess.edges.clone(), radius: sess.radius.clone(), chamfer: sess.chamfer })
+        });
+        match action {
+            DialogAction::Ok => {
+                let Mode::Fillet(sess) = std::mem::replace(&mut self.mode, Mode::Model) else { return };
+                let feature = FilletFeature { edges: sess.edges, radius: sess.radius, chamfer: sess.chamfer };
+                let prefix = if feature.chamfer { "Chamfer" } else { "Fillet" };
+                self.checkpoint(prefix);
+                apply_feature(&mut self.doc, sess.editing, prefix, FeatureKind::Fillet(feature));
+                self.message = None;
+                self.rebuild();
             }
-            self.message = None;
-            self.rebuild();
-        } else if close {
-            self.mode = Mode::Model;
+            DialogAction::Cancel => self.cancel(),
+            DialogAction::None => match preview {
+                Some((editing, f)) => {
+                    let key = format!("{editing:?} {f:?}");
+                    let prefix = if f.chamfer { "Chamfer" } else { "Fillet" };
+                    self.update_preview(key, |doc| apply_feature(doc, editing, prefix, FeatureKind::Fillet(f)));
+                }
+                None => self.preview = None,
+            },
         }
     }
 
@@ -336,50 +488,156 @@ impl FerroApp {
 
     pub fn parameters_window(&mut self, ctx: &egui::Context) {
         if self.param_edits.is_empty() {
-            self.param_edits =
-                self.doc.params.iter().map(|p| (p.name.clone(), p.expression.clone())).collect();
+            self.param_edits = self.doc.params.iter().map(|p| (p.name.clone(), p.expression.clone())).collect();
         }
         let mut open = true;
         let mut changed: Option<(String, String)> = None;
         let mut remove: Option<String> = None;
         let mut add = false;
-
-        egui::Window::new("Parameters").default_width(380.0).show(ctx, |ui| {
-            egui::Grid::new("params").num_columns(4).striped(true).show(ui, |ui| {
-                ui.strong("Name");
-                ui.strong("Expression");
-                ui.strong("Value");
-                ui.end_row();
-                for (name, expr) in &mut self.param_edits {
-                    ui.label(name.as_str());
-                    let r = ui.add(egui::TextEdit::singleline(expr).desired_width(140.0));
-                    if r.lost_focus() {
-                        changed = Some((name.clone(), expr.clone()));
+        // Model parameters: (feature, slot, feature name, label, expression).
+        // Slots ≥ SKETCH_SLOT are sketch dimensions (slot − SKETCH_SLOT = constraint id).
+        const SKETCH_SLOT: usize = 1_000_000;
+        let mut rows: Vec<(FeatureId, usize, String, String, String)> = Vec::new();
+        for f in self.doc.features() {
+            match &f.kind {
+                FeatureKind::Sketch(sf) => {
+                    for (cid, c) in sf.sketch.constraints().filter(|(_, c)| c.is_dimension()) {
+                        let text = sf.expression_for(cid).map(str::to_string).unwrap_or_else(|| match c {
+                            ferrocad_sketch::Constraint::Angle(_, _, v) => format!("{:.3}", v.to_degrees()),
+                            _ => format!("{:.3}", c.value().unwrap_or(0.0)),
+                        });
+                        rows.push((f.id, SKETCH_SLOT + cid.0, f.name.clone(), c.label().to_string(), text));
                     }
-                    let value = self.doc.params.value(name);
-                    match value {
-                        Ok(v) => ui.label(format!("{v:.3}")),
-                        Err(e) => ui.colored_label(Color32::from_rgb(255, 110, 100), e.to_string()),
-                    };
-                    if ui.small_button("✕").clicked() {
-                        remove = Some(name.clone());
+                }
+                kind => {
+                    let mut k = kind.clone();
+                    for (slot, (label, text)) in k.expressions_mut().into_iter().enumerate() {
+                        rows.push((f.id, slot, f.name.clone(), label.to_string(), text.clone()));
                     }
-                    ui.end_row();
                 }
-            });
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.new_param.0).hint_text("name").desired_width(90.0));
-                ui.add(egui::TextEdit::singleline(&mut self.new_param.1).hint_text("expression").desired_width(140.0));
-                if ui.button("Add").clicked() {
-                    add = true;
-                }
-            });
-            ui.weak("Units: mm cm m in · deg rad · functions: sqrt sin cos tan min max …");
-            if ui.button("Close").clicked() {
-                open = false;
             }
-        });
+        }
+        let mut model_change: Option<(FeatureId, usize, String)> = None;
+
+        egui::Window::new("Parameters")
+            .id(egui::Id::new("parameters_window"))
+            .title_bar(false)
+            .frame(theme::dialog_frame())
+            .default_pos(self.viewport_rect.center_top() + egui::vec2(-220.0, 60.0))
+            .resizable(false)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin::symmetric(10, 7))
+                    .corner_radius(egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                            icons::paint(ui.painter(), r, Icon::Parameters, theme::ICON, true);
+                            ui.label(RichText::new("PARAMETERS").strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if icons::icon_button(ui, Icon::Cancel, 18.0, "Close", true, false).clicked() {
+                                    open = false;
+                                }
+                            });
+                        });
+                    });
+                egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                    theme::section(ui, "User parameters");
+                    egui::Grid::new("params").num_columns(4).striped(true).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.weak("Name");
+                        ui.weak("Expression");
+                        ui.weak("Value");
+                        ui.end_row();
+                        for (name, expr) in &mut self.param_edits {
+                            ui.label(RichText::new(name.as_str()).strong());
+                            let r = ui.add(egui::TextEdit::singleline(expr).desired_width(150.0));
+                            if r.lost_focus() {
+                                changed = Some((name.clone(), expr.clone()));
+                            }
+                            match self.doc.params.value(name) {
+                                Ok(v) => ui.label(format!("{v:.3}")),
+                                Err(e) => ui.colored_label(theme::ERROR, e.to_string()),
+                            };
+                            if icons::icon_button(ui, Icon::Delete, 20.0, "Delete parameter", true, false).clicked() {
+                                remove = Some(name.clone());
+                            }
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(8.0);
+                    theme::section(ui, "Add parameter");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.new_param.0).hint_text("name").desired_width(90.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.new_param.1).hint_text("expression").desired_width(150.0));
+                        if theme::primary_button(ui, "Add", !self.new_param.0.trim().is_empty()).clicked() {
+                            add = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.weak("Units: mm cm m in · deg rad · functions: sqrt sin cos tan min max …");
+                    ui.add_space(8.0);
+                    egui::CollapsingHeader::new(RichText::new("MODEL PARAMETERS").small().strong().color(theme::TEXT_WEAK))
+                        .id_salt("model_params")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if rows.is_empty() {
+                                ui.weak("No dimensions or feature values yet.");
+                            }
+                            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                egui::Grid::new("model_params_grid").num_columns(4).striped(true).spacing([10.0, 4.0]).show(
+                                    ui,
+                                    |ui| {
+                                        let mut last = None;
+                                        for (fid, slot, fname, label, text) in &rows {
+                                            if last != Some(*fid) {
+                                                ui.label(RichText::new(fname).strong());
+                                                last = Some(*fid);
+                                            } else {
+                                                ui.label("");
+                                            }
+                                            ui.weak(label);
+                                            let buf = self.model_param_edits.entry((*fid, *slot)).or_insert_with(|| text.clone());
+                                            let r = ui.add(egui::TextEdit::singleline(buf).desired_width(130.0));
+                                            if r.lost_focus() && buf.trim() != text.trim() {
+                                                model_change = Some((*fid, *slot, buf.clone()));
+                                            }
+                                            match self.doc.params.eval(buf) {
+                                                Ok(v) => ui.weak(format!("{v:.3}")),
+                                                Err(e) => ui.colored_label(theme::ERROR, e.to_string()),
+                                            };
+                                            ui.end_row();
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                });
+            });
+
+        if let Some((fid, slot, text)) = model_change {
+            self.model_param_edits.clear();
+            match self.doc.params.eval(&text) {
+                Err(e) => self.error(e.to_string()),
+                Ok(_) => {
+                    self.checkpoint("Change model parameter");
+                    if let Some(f) = self.doc.feature_mut(fid) {
+                        match &mut f.kind {
+                            FeatureKind::Sketch(sf) if slot >= SKETCH_SLOT => {
+                                sf.set_expression(ferrocad_sketch::ConstraintId(slot - SKETCH_SLOT), text.trim());
+                            }
+                            kind => {
+                                if let Some((_, e)) = kind.expressions_mut().into_iter().nth(slot) {
+                                    *e = text.trim().to_string();
+                                }
+                            }
+                        }
+                    }
+                    self.message = None;
+                    self.rebuild();
+                }
+            }
+        }
 
         let mut needs_rebuild = false;
         let before = (changed.is_some() || remove.is_some() || add).then(|| self.doc.clone());
@@ -460,8 +718,13 @@ impl RevolveSession {
 }
 
 /// World-space axis (point, direction) of a revolve axis choice.
-fn axis_world(sf: &SketchFeature, axis: RevolveAxis) -> Option<([f64; 3], [f64; 3])> {
+fn axis_world(
+    sf: &SketchFeature,
+    axis: RevolveAxis,
+    other: &dyn Fn(ferrocad_model::AxisRef) -> Option<([f64; 3], [f64; 3])>,
+) -> Option<([f64; 3], [f64; 3])> {
     match axis {
+        RevolveAxis::Axis(a) => other(a),
         RevolveAxis::SketchX => Some((sf.plane.origin, sf.plane.x_axis)),
         RevolveAxis::SketchY => Some((sf.plane.origin, sf.plane.y_axis)),
         RevolveAxis::Line(l) => match *sf.sketch.entity(l) {
@@ -477,11 +740,12 @@ fn axis_world(sf: &SketchFeature, axis: RevolveAxis) -> Option<([f64; 3], [f64; 
 
 fn axis_label(sf: &SketchFeature, axis: RevolveAxis) -> String {
     match axis {
+        RevolveAxis::Axis(a) => a.label(),
         RevolveAxis::SketchX => "Sketch X axis".into(),
         RevolveAxis::SketchY => "Sketch Y axis".into(),
         RevolveAxis::Line(l) => {
             let kind = if sf.sketch.is_construction(l) { "construction line" } else { "line" };
-            match axis_world(sf, axis) {
+            match axis_world(sf, axis, &|_| None) {
                 Some((_, d)) => format!("{kind} #{} ({:.1} mm)", l.0, ferrocad_model::geom::length(d)),
                 None => format!("{kind} #{} (deleted)", l.0),
             }
@@ -490,19 +754,20 @@ fn axis_label(sf: &SketchFeature, axis: RevolveAxis) -> String {
 }
 
 impl FerroApp {
-    pub fn revolve_viewport(
-        &mut self,
-        response: &egui::Response,
-        painter: &egui::Painter,
-        vp: &Viewport,
-    ) {
+    pub fn revolve_viewport(&mut self, response: &egui::Response, painter: &egui::Painter, vp: &Viewport) {
         let cam = self.camera;
+        let axes: Vec<(ferrocad_model::AxisRef, AxisLine)> = (0..3)
+            .map(ferrocad_model::AxisRef::World)
+            .chain(self.construction_axes().into_iter().map(|(id, _)| ferrocad_model::AxisRef::Construction(id)))
+            .filter_map(|a| self.axis_of(&a).map(|v| (a, v)))
+            .collect();
         let Mode::Revolve(sess) = &mut self.mode else { return };
         let Some(sf) = sess.sketch.and_then(|id| self.doc.sketch(id)) else { return };
         pick_profile(sf, &mut sess.profile_point, response, painter, vp, &cam);
 
         // Show the axis as a long dashed line.
-        if let Some((o, d)) = axis_world(sf, sess.axis) {
+        let other = |a| axes.iter().find(|(r, _)| *r == a).map(|(_, v)| *v);
+        if let Some((o, d)) = axis_world(sf, sess.axis, &other) {
             let d = ferrocad_model::geom::normalize(d);
             let reach = cam.distance * 2.0;
             let a = ferrocad_model::geom::add(o, ferrocad_model::geom::scale(d, -reach));
@@ -515,14 +780,10 @@ impl FerroApp {
     }
 
     pub fn revolve_window(&mut self, ctx: &egui::Context) {
-        let mut close = false;
-        let mut commit = false;
-        let sketches: Vec<(FeatureId, String)> = self.doc.features()[..self.doc.marker()]
-            .iter()
-            .filter(|f| matches!(f.kind, FeatureKind::Sketch(_)))
-            .map(|f| (f.id, f.name.clone()))
-            .collect();
+        let sketches = self.sketches_before_marker();
         let params = self.doc.params.clone();
+        let preview_error = self.preview.as_ref().and_then(|p| p.error.clone());
+        let viewport = self.viewport_rect;
         let Mode::Revolve(sess) = &mut self.mode else { return };
         let sketch_feature = sess.sketch.and_then(|id| self.doc.sketch(id));
         // Axis choices: the sketch axes plus every line in the sketch.
@@ -535,97 +796,76 @@ impl FerroApp {
                         .filter(|(_, e)| matches!(e, ferrocad_sketch::Entity::Line { .. }))
                         .map(|(id, _)| RevolveAxis::Line(id)),
                 );
+                v.extend((0..3).map(|i| RevolveAxis::Axis(ferrocad_model::AxisRef::World(i))));
+                v.extend(
+                    self.model
+                        .axes
+                        .keys()
+                        .map(|id| RevolveAxis::Axis(ferrocad_model::AxisRef::Construction(*id))),
+                );
                 v.into_iter().map(|a| (a, axis_label(sf, a))).collect()
             }
             None => vec![],
         };
+        let ready = sess.sketch.is_some() && sess.profile_point.is_some() && params.eval(&sess.angle).is_ok();
 
-        egui::Window::new("Revolve").default_width(280.0).show(ctx, |ui| {
-            let current = sketches
-                .iter()
-                .find(|(id, _)| Some(*id) == sess.sketch)
-                .map(|(_, n)| n.clone())
-                .unwrap_or_else(|| "–".into());
-            egui::ComboBox::from_label("Sketch").selected_text(current).show_ui(ui, |ui| {
-                for (id, name) in &sketches {
-                    if ui.selectable_value(&mut sess.sketch, Some(*id), name.as_str()).clicked() {
-                        sess.profile_point = None;
-                        sess.axis = RevolveAxis::SketchY;
-                    }
-                }
-            });
-            if sess.profile_point.is_some() {
-                ui.label("✔ Profile selected (click another to change)");
-            } else {
-                ui.colored_label(COL_PICKED, "Click inside a profile in the viewport");
+        let action = command_dialog(ctx, viewport, "Revolve", Icon::Revolve, ready, |ui| {
+            form_label(ui, "Sketch");
+            if sketch_combo(ui, "revolve_sketch", &sketches, &mut sess.sketch) {
+                sess.profile_point = None;
+                sess.axis = RevolveAxis::SketchY;
             }
-            let axis_text = axes
-                .iter()
-                .find(|(a, _)| *a == sess.axis)
-                .map(|(_, l)| l.clone())
-                .unwrap_or_else(|| "–".into());
-            egui::ComboBox::from_label("Axis").selected_text(axis_text).show_ui(ui, |ui| {
+            ui.end_row();
+            form_label(ui, "Profile");
+            selection_status(ui, sess.profile_point.is_some(), "1 selected", "Select a profile");
+            ui.end_row();
+            form_label(ui, "Axis");
+            let axis_text =
+                axes.iter().find(|(a, _)| *a == sess.axis).map(|(_, l)| l.clone()).unwrap_or_else(|| "–".into());
+            egui::ComboBox::from_id_salt("revolve_axis").selected_text(axis_text).width(150.0).show_ui(ui, |ui| {
                 for (a, label) in &axes {
                     ui.selectable_value(&mut sess.axis, *a, label.as_str());
                 }
             });
-            ui.horizontal(|ui| {
-                ui.label("Angle (°)");
-                ui.text_edit_singleline(&mut sess.angle);
-            });
-            match params.eval(&sess.angle) {
-                Ok(v) => ui.weak(format!("= {v:.2}°")),
-                Err(e) => ui.colored_label(Color32::from_rgb(255, 110, 100), e.to_string()),
-            };
-            egui::ComboBox::from_label("Operation").selected_text(sess.operation.label()).show_ui(
-                ui,
-                |ui| {
-                    for op in Operation::ALL {
-                        ui.selectable_value(&mut sess.operation, op, op.label());
-                    }
-                },
-            );
-            ui.separator();
-            ui.horizontal(|ui| {
-                let ready = sess.sketch.is_some()
-                    && sess.profile_point.is_some()
-                    && params.eval(&sess.angle).is_ok();
-                if ui.add_enabled(ready, egui::Button::new("OK")).clicked() {
-                    commit = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    close = true;
-                }
-            });
+            ui.end_row();
+            form_label(ui, "Angle");
+            expression_field(ui, &params, &mut sess.angle, "°");
+            ui.end_row();
+            form_label(ui, "Operation");
+            operation_combo(ui, "revolve_op", &mut sess.operation);
+            ui.end_row();
+            preview_status(ui, preview_error.as_deref());
         });
 
-        if commit {
-            let Mode::Revolve(sess) = std::mem::replace(&mut self.mode, Mode::Model) else { return };
-            let (Some(sketch), Some(profile_point)) = (sess.sketch, sess.profile_point) else { return };
-            let feature = RevolveFeature {
+        let feature = match (sess.sketch, sess.profile_point) {
+            (Some(sketch), Some(profile_point)) => Some(RevolveFeature {
                 sketch,
                 profile_point,
                 axis: sess.axis,
-                angle: sess.angle,
+                angle: sess.angle.clone(),
                 operation: sess.operation,
-            };
-            self.checkpoint("Revolve");
-            match sess.editing.and_then(|id| self.doc.feature_mut(id)) {
-                Some(f) => f.kind = FeatureKind::Revolve(feature),
-                None => {
-                    let name = self.doc.next_name("Revolve");
-                    self.doc.add(name, FeatureKind::Revolve(feature));
+            }),
+            _ => None,
+        };
+        let editing = sess.editing;
+        match action {
+            DialogAction::Ok => {
+                let Some(feature) = feature else { return };
+                let sketch = feature.sketch;
+                self.mode = Mode::Model;
+                self.checkpoint("Revolve");
+                apply_feature(&mut self.doc, editing, "Revolve", FeatureKind::Revolve(feature));
+                self.hidden_sketches.insert(sketch);
+                self.finish_body_command();
+            }
+            DialogAction::Cancel => self.cancel(),
+            DialogAction::None => match feature.filter(|_| ready) {
+                Some(f) => {
+                    let key = format!("{editing:?} {f:?}");
+                    self.update_preview(key, |doc| apply_feature(doc, editing, "Revolve", FeatureKind::Revolve(f)));
                 }
-            }
-            let first_body = self.bodies.is_empty();
-            self.message = None;
-            self.rebuild();
-            if first_body {
-                self.camera.set_view(ferrocad_view::ViewPreset::Home);
-                self.fit_view();
-            }
-        } else if close {
-            self.mode = Mode::Model;
+                None => self.preview = None,
+            },
         }
     }
 }
