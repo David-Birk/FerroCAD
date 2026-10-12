@@ -73,6 +73,9 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, ExprError> {
                 i += 1;
             }
             out.push(Tok::Ident(chars[start..i].iter().collect()));
+        } else if c == '°' {
+            out.push(Tok::Ident("deg".into()));
+            i += 1;
         } else if "+-*/^(),".contains(c) {
             out.push(Tok::Op(c));
             i += 1;
@@ -303,6 +306,8 @@ mod tests {
     fn units_and_functions() {
         assert_eq!(eval_const("2 cm + 5 mm").unwrap(), 25.0);
         assert_eq!(eval_const("1in").unwrap(), 25.4);
+        assert_eq!(eval_const("45°").unwrap(), 45.0);
+        assert_eq!(eval_const("90 ° / 2").unwrap(), 45.0);
         assert!((eval_const("sin(30)").unwrap() - 0.5).abs() < 1e-12);
         assert_eq!(eval_const("max(3, sqrt(16))").unwrap(), 4.0);
         assert!((eval_const("pi rad").unwrap() - 180.0).abs() < 1e-12);

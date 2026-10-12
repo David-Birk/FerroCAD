@@ -1,181 +1,181 @@
 # ferrocad
 
-Ein natives, parametrisches CAD für Linux in Rust – Workflow und Oberfläche nach dem Vorbild von
-Fusion 360: **Skizze → Bedingungen/Bemaßungen → Körper-Features**, alles über eine Zeitleiste und
-Parameter steuerbar.
+*[Deutsche Version](docs/README.de.md)*
 
-> **Hinweis:** ferrocad ist ein vibe-codetes Hobbyprojekt, kein professionelles Produkt und nicht mit
-> Autodesk oder FreeCAD verbunden. Details im [Disclaimer](docs/DISCLAIMER.md).
+Native parametric CAD for Linux, written in Rust. The workflow and UI follow Fusion 360:
+**sketch → constraints/dimensions → solid features**, all driven by a timeline and parameters.
 
-## Inhalt
+> **Note:** ferrocad is a vibe-coded hobby project, not a professional product, and it is not
+> affiliated with Autodesk or FreeCAD. Details in the [disclaimer](docs/DISCLAIMER.md).
+
+## Contents
 
 - [Features](#features)
-- [Bauen (Arch Linux)](#bauen-arch-linux)
-- [Bedienung](#bedienung)
-- [Dateiformat](#dateiformat-fcad)
-- [Architektur](#architektur)
-- [Bekannte Grenzen](#bekannte-grenzen)
-- [Mitmachen](#mitmachen)
-- [Lizenz](#lizenz)
+- [Building (Arch Linux)](#building-arch-linux)
+- [Usage](#usage)
+- [File format](#file-format-fcad)
+- [Architecture](#architecture)
+- [Known limitations](#known-limitations)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Features
 
-**Oberfläche:** Menüleiste (Datei, Rückgängig/Wiederholen) · Ribbon mit den Bereichen SOLID bzw.
-SKETCH (Erstellen, Ändern, Konstruieren, Prüfen, jede Gruppe mit ▾-Menü) · Browser links ·
-Skizzenpalette rechts · ViewCube · Navigationsleiste · Zeitleiste · Statuszeile mit Hinweisen zum
-aktiven Werkzeug.
+**UI:** menu bar (File, Undo/Redo) · ribbon with SOLID and SKETCH tabs (Create, Modify, Construct,
+Inspect; every group has a ▾ menu) · browser on the left · sketch palette on the right · ViewCube ·
+navigation bar · timeline · status bar with hints for the active tool.
 
-### Skizzieren
+### Sketching
 
-- **Skizze erstellen:** Ursprungsebene, Konstruktionsebene oder eine **ebene Körperfläche** anklicken.
-  Skizzen auf Flächen und Konstruktionsebenen wandern mit, wenn sich das Modell ändert.
-- **Werkzeuge:** Linie (L), Rechteck (R), Mittelpunkt-Rechteck, Kreis (C), Bogen (A), 3-Punkt-Bogen,
-  Polygon, Langloch, **Spline** (Stützpunkte klicken, Enter/Doppelklick beendet), Projizieren (P) von
-  Körperkanten (lila; Linien, Kreise und Bögen folgen dem Modell).
-- **Werte direkt eintippen:** Nach dem ersten Klick erscheinen Eingabefelder an der Geometrie
-  (Länge/Winkel, Breite/Höhe, Durchmesser) – Wert tippen, **Tab** zum nächsten Feld, **Enter** erzeugt
-  die Form. Getippte Werte werden echte Bemaßungen, auch mit Parametern (`breite / 2`).
-- **Bemaßen (D):** Linie anklicken und platzieren, zweite Linie für Winkel, zwei Punkte (seitlich =
-  vertikal, ober-/unterhalb = horizontal), Kreis/Bogen. Doppelklick auf eine Bemaßung bearbeitet sie.
-- **Bedingungen:** Horizontal, Vertikal, Koinzident, Parallel, Senkrecht, Gleich, Tangential,
-  Konzentrisch, Mittelpunkt, Fixieren – Werkzeug wählen, Geometrie anklicken. Symbole an der Geometrie
-  lassen sich anklicken und mit Entf löschen. Blau = noch frei, weiß = voll bestimmt.
-- **Ändern:** Trimmen (T), Verlängern, Skizzen-Verrundung, Versatz (O, ganze Kette), Spiegeln
-  (symmetrisch verknüpft), Rechteck- und Kreismuster, Konstruktion (X), Löschen.
-- **Auswahlrechteck:** Im leeren Bereich ziehen – nach rechts wählt nur, was ganz im Rechteck liegt
-  (Fenster), nach links alles, was es berührt (Kreuzen). Shift/Ctrl erweitert die Auswahl.
+- **Create a sketch:** click an origin plane, a construction plane or a **flat face of a body**.
+  Sketches on faces and construction planes follow the model when it changes.
+- **Tools:** line (L), rectangle (R), centre rectangle, circle (C), arc (A), 3-point arc, polygon,
+  slot, **spline** (click fit points; Enter or double-click finishes), project (P) body edges (purple;
+  lines, circles and arcs follow the model).
+- **Type values while drawing:** after the first click, input fields appear at the geometry
+  (length/angle, width/height, diameter). Type a value, **Tab** to the next field, **Enter** creates the
+  shape. Typed values become real dimensions, parameters included (`width / 2`).
+- **Units:** values always show their unit (`30 mm`, `45°`) – in dimensions, input fields, dialogs and
+  the parameter table. A plain number gets its unit when you leave the field; `cm`, `m`, `in`,
+  `deg`/`°` and `rad` can be typed as well.
+- **Dimension (D):** click a line and place it, a second line for an angle, two points (to the side =
+  vertical, above/below = horizontal), a circle or arc. Double-click a dimension to edit it.
+- **Constraints:** horizontal, vertical, coincident, parallel, perpendicular, equal, tangent,
+  concentric, midpoint, fix – pick the tool, click the geometry. The constraint badges can be clicked
+  and deleted with Del. Blue = still free, white = fully defined.
+- **Modify:** trim (T), extend, sketch fillet, offset (O, whole chain), mirror (linked symmetrically),
+  rectangular and circular pattern, construction (X), delete.
+- **Selection box:** drag in empty space – to the right selects only what lies fully inside (window),
+  to the left everything it touches (crossing). Shift/Ctrl adds to the selection.
 
-### Körper
+### Solids
 
-- **Erstellen:** Extrusion (E, eine Seite/zwei Seiten/symmetrisch, Flip, Verjüngungswinkel, auf
-  Flächen standardmäßig Vereinigen), Drehung
-  (Achse: Skizzenachse, Skizzenlinie, Welt- oder Konstruktionsachse), Loft, Sweep, Bohrung (H,
-  einfach/Senkung/Kegelsenkung), Rechteck- und Kreismuster, Spiegeln.
-- **Ändern:** Drücken/Ziehen (Q) einer Fläche, Verrundung (F), Fase (gleicher Abstand oder zwei
-  Abstände), Formschräge (Draft: Flächen um eine neutrale Ebene neigen), Wandstärke (Shell), Kombinieren,
-  Körper teilen, Verschieben/Kopieren (M), Entfernen (Entf), Parameter (Benutzer- und
-  Modellparameter: alle Bemaßungen und Feature-Werte in einer Tabelle).
-- **Aussehen:** Rechtsklick auf einen Körper im Browser → *Appearance* (Stahl, Aluminium, Messing,
-  Kunststoffe, Holz …); die Dichte des Materials ergibt die Masse.
-- **Ziehpfeile:** Extrusion und Drücken/Ziehen haben einen Pfeil im Modell, an dem man den Abstand
-  zieht.
-- **Live-Vorschau:** Extrusion, Drehung, Verrundung und alle Dialoge mit Auswahl zeigen eine Vorschau.
-  Enter = OK, Esc = Abbrechen.
+- **Create:** extrude (E; one side / two sides / symmetric, flip, taper angle; joins by default on
+  faces), revolve (axis: sketch axis, sketch line, world or construction axis), loft, sweep, hole (H;
+  simple / counterbore / countersink), rectangular and circular pattern, mirror.
+- **Modify:** press pull (Q) a face, fillet (F), chamfer (equal distance or two distances), draft
+  (tilt faces around a neutral plane), shell, combine, split body, move/copy (M), remove (Del),
+  parameters (user and model parameters: every dimension and feature value in one table).
+- **Appearance:** right-click a body in the browser → *Appearance* (steel, aluminium, brass, plastics,
+  wood …); the material's density gives the mass.
+- **Drag arrows:** extrude and press pull have an arrow in the model to drag the distance.
+- **Live preview:** extrude, revolve, fillet and every dialog with a selection show a preview.
+  Enter = OK, Esc = cancel.
 
-### Konstruieren
+### Construct
 
-- Versatz-/Winkelebene, Mittelebene zwischen zwei parallelen Ebenen/Flächen, Achse durch Kante, Achse
-  senkrecht zur Fläche.
+- Offset/angled plane, midplane between two parallel planes or faces, axis through an edge, axis
+  normal to a face.
 
-### Montieren
+### Assemble
 
-- **Komponente** aus ausgewählten Körpern (eigener Browser-Ordner; ein Klick auf einen ihrer Körper
-  wählt die ganze Komponente, Gelenke/Verschieben/Muster bewegen sie gemeinsam).
-- **Gelenk (Joint):** Körper an eine runde Kante oder Flächenstelle eines anderen setzen – starr, als
-  Drehgelenk oder Schiebegelenk; Winkel/Versatz sind Parameter. Rechtsklick in der Zeitleiste →
-  *Animieren* bewegt das Gelenk (Esc beendet).
-- **Interferenzprüfung** zeigt Überschneidungen rot.
+- **Component** from the selected bodies (own browser folder; clicking one of its bodies selects the
+  whole component, and joints/move/patterns move it as one).
+- **Joint:** place a body at a round edge or a face point of another – rigid, revolute or slider;
+  angle and offset are parameters, with optional limits. Right-click in the timeline → *Animate* moves
+  the joint (Esc stops).
+- **Interference check** shows overlaps in red.
 
-### Prüfen
+### Inspect
 
-- Messen (I: Punkte, Kanten, Durchmesser, Flächeninhalt, Winkel zwischen Flächen/Kanten), Schnittansicht, Eigenschaften (Material, Masse, Volumen,
-  Oberfläche, Schwerpunkt).
+- Measure (I: points, edges, diameters, face area, angles between faces/edges), section view,
+  properties (material, mass, volume, surface area, centre of mass).
 
-### Datei und Zeitleiste
+### File and timeline
 
-- **Zeitleiste:** Doppelklick = bearbeiten, Rechtsklick = unterdrücken / zurückrollen / verschieben /
-  löschen, orangen Marker ziehen zum Zurückrollen.
-- **Datei:** Neu, Öffnen…, Speichern (Ctrl+S), Speichern unter…, **STEP-Import** (ein Körper je Solid,
-  als Feature in der Zeitleiste), STEP- und STL-Export – mit nativen Dateidialogen (XDG-Portal).
-- **Rückgängig/Wiederholen:** Ctrl+Z, Ctrl+Shift+Z oder Ctrl+Y – auch einzelne Skizzenschritte.
+- **Timeline:** double-click = edit, right-click = suppress / roll back / move / delete; drag the
+  orange marker to roll back.
+- **File:** New, Open…, Save (Ctrl+S), Save As…, **STEP import** (one body per solid, as a feature in
+  the timeline), STEP and STL export – with native file dialogs (XDG portal).
+- **Undo/Redo:** Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y – including single sketch steps.
 
-## Bauen (Arch Linux)
+## Building (Arch Linux)
 
 ```sh
-sudo pacman -S --needed cmake clang opencascade   # Rust über rustup, nicht das Paket "rust"
+sudo pacman -S --needed cmake clang opencascade   # Rust via rustup, not the "rust" package
 cargo run --release
-cargo run --release -- teil.fcad                   # Datei direkt öffnen
+cargo run --release -- part.fcad                   # open a file directly
 ```
 
-`opencascade-rs` verlangt OCCT **7.8 oder neuer innerhalb von 7.x** (Arch liefert 7.9). Ohne
-Systembibliothek lässt sich OCCT einmalig aus den Quellen mitbauen (20–40 min):
+`opencascade-rs` needs OCCT **7.8 or newer within 7.x** (Arch ships 7.9). Without the system library,
+OCCT can be built from source once (20–40 min):
 
 ```sh
 cargo run --release --features builtin-occt
 ```
 
-Tests: `cargo test --workspace` (Solver, Regionen, Timeline, Dateiformat, echter OCCT-Kernel und
-Oberflächen-Tests, die ganze Arbeitsabläufe per simulierten Klicks durchspielen).
+Tests: `cargo test --workspace` (solver, regions, timeline, file format, the real OCCT kernel and UI
+tests that play through whole workflows with simulated clicks).
 
-## Bedienung
+## Usage
 
 **Navigation:**
 
-- Rechte Maustaste ziehen = Orbit
-- Mittlere Maustaste = Pan (Shift+Mitte = Orbit)
-- Mausrad = Zoom zum Cursor
-- ViewCube: Flächen, Kanten und Ecken anklicken
-- F6 = Home, Shift+F = Einpassen
-- Rechtsklick = Kontextmenü passend zur Auswahl
+- Drag with the right mouse button = orbit
+- Middle mouse button = pan (Shift+middle = orbit)
+- Mouse wheel = zoom to the cursor
+- ViewCube: click faces, edges and corners
+- F6 = home, Shift+F = fit
+- Right-click = context menu for the selection
 
-**Auswahl:** Flächen und Kanten im Modell anklicken (Shift = mehrere), Körper im Browser. Ein
-passender Befehl übernimmt die Auswahl.
+**Selection:** click faces and edges in the model (Shift = several), bodies in the browser. A matching
+command takes over the selection.
 
-**Befehlssuche (S):** wie in Fusion – Befehl tippen, Enter führt ihn aus.
+**Command search (S):** like in Fusion – type a command, Enter runs it.
 
-**Tastenkürzel:**
+**Shortcuts:**
 
-| Taste | Befehl | Taste | Befehl |
+| Key | Command | Key | Command |
 |---|---|---|---|
-| S | Befehlssuche | E | Extrusion |
-| L | Linie | H | Bohrung |
-| R | Rechteck | Q | Drücken/Ziehen |
-| C | Kreis | F | Verrundung |
-| A | Bogen | M | Verschieben/Kopieren |
-| P | Projizieren | I | Messen |
-| D | Bemaßen | Entf | Entfernen/Löschen |
-| T | Trimmen | Ctrl+S | Speichern |
-| O | Versatz | Ctrl+Z | Rückgängig |
-| X | Konstruktion | Ctrl+Shift+Z / Ctrl+Y | Wiederholen |
-| Enter | OK | Esc | Abbrechen |
+| S | Command search | E | Extrude |
+| L | Line | H | Hole |
+| R | Rectangle | Q | Press pull |
+| C | Circle | F | Fillet |
+| A | Arc | M | Move/copy |
+| P | Project | I | Measure |
+| D | Dimension | Del | Remove/delete |
+| T | Trim | Ctrl+S | Save |
+| O | Offset | Ctrl+Z | Undo |
+| X | Construction | Ctrl+Shift+Z / Ctrl+Y | Redo |
+| Enter | OK | Esc | Cancel |
 
-## Dateiformat `.fcad`
+## File format `.fcad`
 
-Lesbares JSON: Parameter, Skizzen (Punkte, Kurven, Bedingungen, parametrische Bemaßungen) und die
-Feature-Zeitleiste. Körper werden beim Laden neu berechnet, wie bei Fusion. Dateien lassen sich gut
-mit git versionieren; beschädigte Dateien liefern eine Fehlermeldung statt eines Absturzes.
-Ausgeblendete Körper, Skizzen und Konstruktionselemente werden mitgespeichert.
+Readable JSON: parameters, sketches (points, curves, constraints, parametric dimensions) and the
+feature timeline. Bodies are rebuilt on load, as in Fusion. Files work well with git; damaged files
+give an error message instead of a crash. Hidden bodies, sketches and construction geometry are saved
+too.
 
-## Architektur
+## Architecture
 
 ```
 crates/
-├── sketch/       2D-Constraint-Solver, Regionen/Profile, Skizzen-Operationen (keine Abhängigkeiten)
-├── model/        Parameter, Ausdrücke, Feature-Timeline, Kernel-Trait, .fcad-Format
-├── view/         Kamera, Projektion, Picking, Schnitt (GUI-unabhängig)
-├── kernel-occt/  Kernel-Implementierung mit OpenCascade (opencascade-rs)
-└── app/          egui/eframe-Oberfläche (wgpu mit Tiefenpuffer)
-vendor/           angepasste Kopien von opencascade-rs (OCCT 7.9, absturzsichere Operationen)
+├── sketch/       2D constraint solver, regions/profiles, sketch operations (no dependencies)
+├── model/        parameters, expressions, feature timeline, kernel trait, .fcad format
+├── view/         camera, projection, picking, section (GUI-independent)
+├── kernel-occt/  kernel implementation with OpenCascade (opencascade-rs)
+└── app/          egui/eframe UI (wgpu with depth buffer)
+vendor/           patched copies of opencascade-rs (OCCT 7.9, crash-safe operations)
 ```
 
-## Bekannte Grenzen
+## Known limitations
 
-1. **Topologisches Benennungsproblem:** Kanten werden über ihren Mittelpunkt (Toleranz 1 mm), Flächen
-   über Punkt + Normale wiedergefunden. Große Änderungen können eine Auswahl verlieren → Fehler in der
-   Zeitleiste, Kanten/Flächen neu wählen.
-2. Geschlossene Splines lassen sich noch nicht trimmen; überlappende *kollineare* Linien werden in
-   Regionen nicht zusammengeführt. Revolve-Profile dürfen die Achse nicht schneiden.
-3. Konstruktionsebenen und Auswahl-Hervorhebungen werden über die Körper gezeichnet (ohne Tiefentest).
-4. Der Solver nutzt eine numerische Jacobimatrix und dichte lineare Algebra – reicht für Hunderte
-   Unbekannte; für große Skizzen später analytische Ableitungen und eine Sparse-Zerlegung.
-5. Komponenten haben noch keinen eigenen Ursprung und keine eigene Zeitleiste; Gelenkgrenzen, Gewinde,
-   Zeichnungen und Blechteile fehlen noch.
+1. **Topological naming:** edges are found again by their midpoint (1 mm tolerance), faces by point +
+   normal. Big changes can lose a selection → the feature shows an error; re-pick the edges/faces.
+2. Closed splines can't be trimmed yet; overlapping *collinear* lines aren't merged in regions.
+   Revolve profiles must not cross the axis.
+3. Highlighted edges, sketches and outlines are drawn on top of the bodies (no depth test); face
+   highlights and planes are depth-tested.
+4. The solver uses a numeric Jacobian and dense linear algebra – fine for hundreds of unknowns; large
+   sketches will need analytic derivatives and a sparse factorisation later.
+5. Components don't have their own origin or timeline yet; contact sets, threads, drawings and sheet
+   metal are still missing.
 
-## Mitmachen
+## Contributing
 
-Gedanken, Verbesserungen und Feedback sind willkommen – einfach ein Issue oder einen Pull Request
-öffnen. Wie das Projekt entsteht, steht im [Disclaimer](docs/DISCLAIMER.md).
+Thoughts, improvements and feedback are welcome – just open an issue or a pull request. How the
+project is made is explained in the [disclaimer](docs/DISCLAIMER.md).
 
-## Lizenz
+## License
 
-GPL-3.0-or-later. OpenCascade (OCCT) und opencascade-rs stehen unter LGPL-2.1.
+GPL-3.0-or-later. OpenCascade (OCCT) and opencascade-rs are LGPL-2.1.

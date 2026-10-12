@@ -3,6 +3,7 @@
 //! the docked sketch palette.
 
 use crate::app::{FerroApp, Mode};
+use crate::dialogs::{fmt_value, with_unit};
 use crate::icons::{self, Icon};
 use crate::theme;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
@@ -609,18 +610,23 @@ fn e_center(sk: &Sketch, e: EntityId) -> Option<PointId> {
 fn format_dimension(c: &Constraint, v: f64) -> String {
     match c {
         Constraint::Angle(..) => format!("{:.1}°", v.to_degrees()),
-        Constraint::Diameter(..) => format!("Ø{v:.2}"),
-        Constraint::Radius(..) => format!("R{v:.2}"),
-        _ => format!("{:.2}", v.abs()),
+        Constraint::Diameter(..) => format!("Ø{v:.2} mm"),
+        Constraint::Radius(..) => format!("R{v:.2} mm"),
+        _ => format!("{:.2} mm", v.abs()),
     }
 }
 
 /// The expression to show when editing a dimension.
 fn dimension_text(sf: &SketchFeature, id: ConstraintId, c: &Constraint) -> String {
-    sf.driven.iter().find(|(d, _)| *d == id).map(|(_, e)| e.clone()).unwrap_or_else(|| match c {
-        Constraint::Angle(_, _, v) => format!("{:.3}", v.to_degrees()),
-        _ => format!("{:.3}", c.value().unwrap_or(0.0)),
-    })
+    sf.driven.iter().find(|(d, _)| *d == id).map(|(_, e)| e.clone()).unwrap_or_else(|| dimension_value(c))
+}
+
+/// The current value of a dimension with its unit, e.g. "30 mm" or "45°".
+fn dimension_value(c: &Constraint) -> String {
+    match c {
+        Constraint::Angle(_, _, v) => fmt_value(v.to_degrees(), "°"),
+        _ => fmt_value(c.value().unwrap_or(0.0), "mm"),
+    }
 }
 
 /// Set a dimension from an expression (value or parameters) and re-solve.
@@ -632,7 +638,8 @@ fn apply_dimension(sf: &mut SketchFeature, params: &ParamTable, id: ConstraintId
     sf.sketch.set_dimension(id, v);
     match sf.sketch.solve() {
         Ok(_) => {
-            sf.set_expression(id, expr.trim());
+            let unit = if matches!(c, Constraint::Angle(..)) { "°" } else { "mm" };
+            sf.set_expression(id, with_unit(expr, unit));
             Ok(())
         }
         Err(e) => {
@@ -738,10 +745,7 @@ fn create_dimension(sess: &mut SketchSession, sk: &mut Sketch, mut c: Constraint
         *slot = v;
     }
     let id = try_constrain(sk, c.clone())?;
-    let shown = match c {
-        Constraint::Angle(_, _, v) => format!("{:.3}", v.to_degrees()),
-        _ => format!("{:.3}", c.value().unwrap_or(0.0)),
-    };
+    let shown = dimension_value(&c);
     sess.dim_edits.insert(id, shown.clone());
     if let Some(off) = offset {
         sess.dim_offsets.insert(id, off);
@@ -1520,7 +1524,7 @@ impl FerroApp {
             let mid = |a: [f64; 2], b: [f64; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
             match sess.tool {
                 Tool::Line => {
-                    d.fields[0].live = format!("{:.2}", dist(s0, t));
+                    d.fields[0].live = format!("{:.2} mm", dist(s0, t));
                     d.fields[1].live = format!("{:.1}°", (t[1] - s0[1]).atan2(t[0] - s0[0]).to_degrees());
                     if let (Some(a), Some(b)) = (pr.screen(s0), pr.screen(t)) {
                         let dir = unit(b - a);
@@ -1530,8 +1534,8 @@ impl FerroApp {
                 }
                 Tool::Rectangle | Tool::CenterRectangle => {
                     let s0 = if sess.tool == Tool::CenterRectangle { [2.0 * s0[0] - t[0], 2.0 * s0[1] - t[1]] } else { s0 };
-                    d.fields[0].live = format!("{:.2}", (t[0] - s0[0]).abs());
-                    d.fields[1].live = format!("{:.2}", (t[1] - s0[1]).abs());
+                    d.fields[0].live = format!("{:.2} mm", (t[0] - s0[0]).abs());
+                    d.fields[1].live = format!("{:.2} mm", (t[1] - s0[1]).abs());
                     let c = pr.screen(mid(s0, t));
                     let w = pr.screen([(s0[0] + t[0]) * 0.5, t[1]]);
                     let h = pr.screen([t[0], (s0[1] + t[1]) * 0.5]);
@@ -1541,7 +1545,7 @@ impl FerroApp {
                     }
                 }
                 Tool::Circle => {
-                    d.fields[0].live = format!("{:.2}", 2.0 * dist(s0, t));
+                    d.fields[0].live = format!("{:.2} mm", 2.0 * dist(s0, t));
                     if let (Some(a), Some(b)) = (pr.screen(s0), pr.screen(t)) {
                         d.fields[0].pos = Some(a + (b - a) * 0.5 + dim_normal(unit(b - a)) * 24.0);
                     }
@@ -1559,23 +1563,23 @@ impl FerroApp {
                 (Tool::Line, [a]) => {
                     let d = [h[0] - a[0], h[1] - a[1]];
                     let angle = d[1].atan2(d[0]).to_degrees();
-                    (vec![*a, h], Some(format!("{:.2}   {angle:.1}°", d[0].hypot(d[1]))))
+                    (vec![*a, h], Some(format!("{:.2} mm   {angle:.1}°", d[0].hypot(d[1]))))
                 }
                 (Tool::Rectangle, [a]) => (
                     vec![*a, [h[0], a[1]], h, [a[0], h[1]], *a],
-                    Some(format!("{:.2} × {:.2}", (h[0] - a[0]).abs(), (h[1] - a[1]).abs())),
+                    Some(format!("{:.2} × {:.2} mm", (h[0] - a[0]).abs(), (h[1] - a[1]).abs())),
                 ),
                 (Tool::Circle, [c]) => (
                     Segment::Circle { center: *c, radius: dist(*c, h), ccw: true }.sample(64),
-                    Some(format!("Ø{:.2}", 2.0 * dist(*c, h))),
+                    Some(format!("Ø{:.2} mm", 2.0 * dist(*c, h))),
                 ),
-                (Tool::Arc, [c]) => (vec![*c, h], Some(format!("R{:.2}", dist(*c, h)))),
+                (Tool::Arc, [c]) => (vec![*c, h], Some(format!("R{:.2} mm", dist(*c, h)))),
                 (Tool::Arc, [c, s]) => (Segment::Arc { center: *c, from: *s, to: h, ccw: true }.sample(32), None),
                 (Tool::CenterRectangle, [c]) => {
                     let o = [2.0 * c[0] - h[0], 2.0 * c[1] - h[1]];
                     (
                         vec![o, [h[0], o[1]], h, [o[0], h[1]], o],
-                        Some(format!("{:.2} × {:.2}", (h[0] - o[0]).abs(), (h[1] - o[1]).abs())),
+                        Some(format!("{:.2} × {:.2} mm", (h[0] - o[0]).abs(), (h[1] - o[1]).abs())),
                     )
                 }
                 (Tool::Arc3, [s0]) => (vec![*s0, h], None),
@@ -1590,14 +1594,14 @@ impl FerroApp {
                             [c[0] + r * a.cos(), c[1] + r * a.sin()]
                         })
                         .collect();
-                    (pts, Some(format!("{n} sides  R{r:.2}")))
+                    (pts, Some(format!("{n} sides  R{r:.2} mm")))
                 }
                 (Tool::Spline, pts) if !pts.is_empty() => {
                     let mut fit = pts.to_vec();
                     fit.push(h);
                     (ferrocad_sketch::spline_samples(&fit, 16), None)
                 }
-                (Tool::Slot, [c1]) => (vec![*c1, h], Some(format!("{:.2}", dist(*c1, h)))),
+                (Tool::Slot, [c1]) => (vec![*c1, h], Some(format!("{:.2} mm", dist(*c1, h)))),
                 (Tool::Slot, [c1, c2]) => {
                     let w = slot_half_width(*c1, *c2, h);
                     let mut tmp = Sketch::new();
@@ -1605,7 +1609,7 @@ impl FerroApp {
                         Ok(ids) => ids.iter().flat_map(|e| entity_polyline(&tmp, tmp.entity(*e))).collect(),
                         Err(_) => vec![],
                     };
-                    (shape, Some(format!("width {:.2}", 2.0 * w)))
+                    (shape, Some(format!("width {:.2} mm", 2.0 * w)))
                 }
                 _ => (vec![], None),
             };
@@ -1817,6 +1821,11 @@ impl FerroApp {
         let Mode::Sketch(sess) = &mut self.mode else { return };
         let Some(edit) = &mut sess.inline else { return };
         let Some(pos) = edit.pos else { return };
+        let sf_dim_is_angle = self
+            .doc
+            .sketch(sess.feature)
+            .and_then(|sf| sf.sketch.constraint(edit.id))
+            .is_some_and(|c| matches!(c, Constraint::Angle(..)));
         let mut commit = false;
         let mut cancel = false;
         egui::Area::new(egui::Id::new("inline_dimension"))
@@ -1846,7 +1855,8 @@ impl FerroApp {
                     }
                     match params.eval(&edit.text) {
                         Ok(v) if edit.text.trim().parse::<f64>().is_err() => {
-                            ui.weak(format!("= {v:.3}"));
+                            let unit = match sf_dim_is_angle { true => "°", false => "mm" };
+                            ui.weak(format!("= {}", fmt_value(v, unit)));
                         }
                         Err(_) if !edit.text.trim().is_empty() => {
                             ui.colored_label(theme::ERROR, "invalid expression");
@@ -1865,7 +1875,8 @@ impl FerroApp {
         let Some(sf) = self.doc.sketch_mut(sess.feature) else { return };
         match apply_dimension(sf, &params, edit.id, &edit.text) {
             Ok(()) => {
-                sess.dim_edits.insert(edit.id, edit.text.trim().to_owned());
+                let shown = dimension_text(sf, edit.id, sf.sketch.constraint(edit.id).expect("just applied"));
+                sess.dim_edits.insert(edit.id, shown);
                 sess.analysis = None;
                 self.commit_sketch_edit("Edit dimension");
             }
@@ -1974,7 +1985,7 @@ impl FerroApp {
                     sess.tool = Tool::Select;
                 }
                 let text = sess.dim_edits.entry(*id).or_insert_with(|| dimension_text(sf, *id, c));
-                let resp = ui.add(egui::TextEdit::singleline(text).desired_width(100.0));
+                let resp = ui.add_sized([96.0, 20.0], egui::TextEdit::singleline(text));
                 if ui.small_button("×").on_hover_text("Delete dimension").clicked() {
                     remove = Some(*id);
                 }
@@ -1984,7 +1995,10 @@ impl FerroApp {
                     let unchanged = expr == dimension_text(sf, *id, c);
                     if !unchanged {
                         match apply_dimension(sf, &params, *id, &expr) {
-                            Ok(()) => sess.analysis = None,
+                            Ok(()) => {
+                                *text = dimension_text(sf, *id, c);
+                                sess.analysis = None;
+                            }
                             Err(e) => message = Some((e, true)),
                         }
                     }
@@ -2221,7 +2235,7 @@ fn draw_commit(
                 if text.parse::<f64>().is_err() {
                     sf.set_expression(id, text.clone());
                 }
-                sess.dim_edits.insert(id, text);
+                sess.dim_edits.insert(id, with_unit(&text, "mm"));
             }
             Err(e) => *message = Some((e, true)),
         }

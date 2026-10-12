@@ -186,7 +186,7 @@ fn feature_to_json(f: &Feature) -> Json {
             if let Some(d2) = &e.distance2 {
                 add("distance2", d2.as_str().into());
             }
-            if e.taper.trim() != "0" {
+            if !matches!(e.taper.trim(), "0" | "0°" | "0 deg") {
                 add("taper", e.taper.as_str().into());
             }
         }

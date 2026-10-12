@@ -101,6 +101,9 @@ fn sketch_extrude_press_pull_fillet_workflow() {
         .filter_map(|(_, c)| if let Constraint::Length(_, v) = c { Some(*v) } else { None })
         .collect();
     assert_eq!(lengths, vec![30.0, 15.0], "typed values become dimensions");
+    let mut shown: Vec<&String> = sess.dim_edits.values().collect();
+    shown.sort();
+    assert_eq!(shown, ["15 mm", "30 mm"], "typed values show their unit");
     assert_eq!(sf.sketch.entities().count(), 4);
 
     run(&mut h, Command::FinishSketch);
@@ -778,7 +781,7 @@ fn animating_a_revolute_joint() {
     no_errors(h.state());
     press(&mut h, Key::Escape);
     assert!(h.state().animation.is_none());
-    assert_eq!(angle(&h), "0");
+    assert_eq!(angle(&h), "0°");
 }
 
 #[test]
@@ -1053,4 +1056,37 @@ fn measure_face_area_and_angles() {
     assert_eq!(m.picks.iter().map(|p| p.what).collect::<Vec<_>>(), ["edge", "face"]);
     assert!(h.query_by_label("0.000°").is_some(), "edge in the face plane");
     press(&mut h, Key::Escape);
+}
+
+#[test]
+fn values_always_show_their_unit() {
+    use crate::dialogs::{fmt_value, with_unit};
+    assert_eq!(fmt_value(10.0, "mm"), "10 mm");
+    assert_eq!(fmt_value(2.5, "mm"), "2.5 mm");
+    assert_eq!(fmt_value(1.0 / 3.0, "mm"), "0.333 mm");
+    assert_eq!(fmt_value(45.0, "°"), "45°");
+    assert_eq!(fmt_value(-0.0001, "mm"), "0 mm");
+    assert_eq!(fmt_value(6.0, ""), "6");
+    assert_eq!(with_unit(" 12 ", "mm"), "12 mm");
+    assert_eq!(with_unit("5", "°"), "5°");
+    assert_eq!(with_unit("width / 2", "mm"), "width / 2");
+    assert_eq!(with_unit("3", ""), "3");
+
+    // A plain number typed into a dialog field gets its unit when the field
+    // loses focus.
+    let mut h = harness();
+    box_model(&mut h);
+    run(&mut h, Command::Feature(FeatureType::Shell));
+    h.query_all_by_value("1 mm").next().expect("thickness field").click();
+    h.run_steps(1);
+    press(&mut h, Key::Backspace);
+    press(&mut h, Key::Backspace);
+    press(&mut h, Key::Backspace);
+    press(&mut h, Key::Backspace);
+    type_text(&mut h, "2");
+    press(&mut h, Key::Tab);
+    h.run_steps(2);
+    let Mode::Feature(s) = &h.state().mode else { panic!("left the dialog") };
+    assert_eq!(s.exprs[0].text, "2 mm");
+    assert!(h.query_by_label("= 2 mm").is_some());
 }

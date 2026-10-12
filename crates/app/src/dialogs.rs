@@ -58,7 +58,7 @@ impl ExtrudeSession {
             symmetric: false,
             two_sides: false,
             distance2: "10 mm".into(),
-            taper: "0".into(),
+            taper: "0°".into(),
             operation: if on_face { Operation::Join } else { Operation::NewBody },
         }
     }
@@ -225,12 +225,40 @@ pub(crate) fn form_label(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).color(theme::TEXT_WEAK));
 }
 
-/// Expression field with its evaluated value or error underneath.
+/// `v` with up to three decimals (trailing zeros dropped) and its unit:
+/// `fmt_value(10.0, "mm")` = "10 mm", `fmt_value(45.0, "°")` = "45°".
+pub(crate) fn fmt_value(v: f64, unit: &str) -> String {
+    let mut n = format!("{v:.3}");
+    if n.contains('.') {
+        n = n.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    if n == "-0" {
+        n = "0".into();
+    }
+    match unit {
+        "" => n,
+        "°" => format!("{n}°"),
+        u => format!("{n} {u}"),
+    }
+}
+
+/// A plain number gets its unit ("10" → "10 mm"); expressions stay as typed.
+pub(crate) fn with_unit(text: &str, unit: &str) -> String {
+    match text.trim().parse::<f64>() {
+        Ok(v) if !unit.is_empty() && v.is_finite() => fmt_value(v, unit),
+        _ => text.trim().to_string(),
+    }
+}
+
+/// Expression field with its evaluated value or error underneath. A plain
+/// number gets its unit appended when the field loses focus.
 pub(crate) fn expression_field(ui: &mut Ui, params: &ParamTable, text: &mut String, unit: &str) {
     ui.vertical(|ui| {
-        ui.add(egui::TextEdit::singleline(text).desired_width(150.0));
+        if ui.add(egui::TextEdit::singleline(text).desired_width(150.0)).lost_focus() {
+            *text = with_unit(text, unit);
+        }
         match params.eval(text) {
-            Ok(v) => ui.weak(format!("= {v:.3} {unit}")),
+            Ok(v) => ui.weak(format!("= {}", fmt_value(v, unit))),
             Err(e) => ui.colored_label(theme::ERROR, e.to_string()),
         };
     });
@@ -583,8 +611,8 @@ impl FerroApp {
                 FeatureKind::Sketch(sf) => {
                     for (cid, c) in sf.sketch.constraints().filter(|(_, c)| c.is_dimension()) {
                         let text = sf.expression_for(cid).map(str::to_string).unwrap_or_else(|| match c {
-                            ferrocad_sketch::Constraint::Angle(_, _, v) => format!("{:.3}", v.to_degrees()),
-                            _ => format!("{:.3}", c.value().unwrap_or(0.0)),
+                            ferrocad_sketch::Constraint::Angle(_, _, v) => fmt_value(v.to_degrees(), "°"),
+                            _ => fmt_value(c.value().unwrap_or(0.0), "mm"),
                         });
                         rows.push((f.id, SKETCH_SLOT + cid.0, f.name.clone(), c.label().to_string(), text));
                     }
@@ -682,8 +710,15 @@ impl FerroApp {
                                             if r.lost_focus() && buf.trim() != text.trim() {
                                                 model_change = Some((*fid, *slot, buf.clone()));
                                             }
+                                            let unit = if label.contains('°') || label.contains("Angle") || label == "Taper" {
+                                                "°"
+                                            } else if label.starts_with("Count") {
+                                                ""
+                                            } else {
+                                                "mm"
+                                            };
                                             match self.doc.params.eval(buf) {
-                                                Ok(v) => ui.weak(format!("{v:.3}")),
+                                                Ok(v) => ui.weak(fmt_value(v, unit)),
                                                 Err(e) => ui.colored_label(theme::ERROR, e.to_string()),
                                             };
                                             ui.end_row();
@@ -780,7 +815,7 @@ impl RevolveSession {
             sketch: ExtrudeSession::new(doc).sketch,
             profile_point: None,
             axis: RevolveAxis::SketchY,
-            angle: "360".into(),
+            angle: "360°".into(),
             operation: Operation::NewBody,
         }
     }

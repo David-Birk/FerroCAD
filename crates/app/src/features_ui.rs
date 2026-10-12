@@ -196,7 +196,7 @@ impl FeatureSession {
             T::Shell => (vec![sel("Faces to remove", K::Face, true)], vec![expr("Thickness", "1 mm", "mm")], vec![]),
             T::Draft => (
                 vec![sel("Faces", K::Face, true), sel("Pull direction", K::Plane, false)],
-                vec![expr("Angle", "3", "°")],
+                vec![expr("Angle", "3°", "°")],
                 vec![("Flip", false)],
             ),
             T::Hole => (
@@ -206,7 +206,7 @@ impl FeatureSession {
                     expr("Depth", "10 mm", "mm"),
                     expr("Head diameter", "9 mm", "mm"),
                     expr("Head depth", "3 mm", "mm"),
-                    expr("Head angle", "90", "°"),
+                    expr("Head angle", "90°", "°"),
                 ],
                 vec![("Through all", false)],
             ),
@@ -237,7 +237,7 @@ impl FeatureSession {
                 axis.picks.push(Pick::Axis(AxisRef::World(2)));
                 (
                     vec![sel("Bodies", K::Body, true), axis],
-                    vec![expr("Count", "6", ""), expr("Total angle", "360", "°")],
+                    vec![expr("Count", "6", ""), expr("Total angle", "360°", "°")],
                     vec![("Join to original", false)],
                 )
             }
@@ -256,7 +256,7 @@ impl FeatureSession {
                         expr("X distance", "0 mm", "mm"),
                         expr("Y distance", "0 mm", "mm"),
                         expr("Z distance", "0 mm", "mm"),
-                        expr("Angle", "0", "°"),
+                        expr("Angle", "0°", "°"),
                     ],
                     vec![("Create copy", false)],
                 )
@@ -265,7 +265,7 @@ impl FeatureSession {
             T::Sweep => (vec![sel("Profile", K::Profile, false), sel("Path", K::Curve, true)], vec![], vec![]),
             T::Plane => (
                 vec![sel("Reference", K::Plane, false)],
-                vec![expr("Offset", "10 mm", "mm"), expr("Angle", "0", "°")],
+                vec![expr("Offset", "10 mm", "mm"), expr("Angle", "0°", "°")],
                 vec![],
             ),
             T::Midplane => (vec![sel("Plane 1", K::Plane, false), sel("Plane 2", K::Plane, false)], vec![], vec![]),
@@ -277,7 +277,7 @@ impl FeatureSession {
                     sel("Origin on moving part", K::JointOrigin, false),
                     sel("Origin on fixed part", K::JointOrigin, false),
                 ],
-                vec![expr("Angle", "0", "°"), expr("Offset", "0 mm", "mm"), expr("Minimum", "0", ""), expr("Maximum", "90", "")],
+                vec![expr("Angle", "0°", "°"), expr("Offset", "0 mm", "mm"), expr("Minimum", "0", ""), expr("Maximum", "90", "")],
                 vec![("Flip", false), ("Limits", false)],
             ),
         };

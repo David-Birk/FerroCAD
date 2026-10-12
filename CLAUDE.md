@@ -4,7 +4,8 @@ Native parametric CAD for Linux in Rust, modelled on Fusion 360 (workflow and UI
 constraints/dimensions → solid features, driven by a feature timeline and user parameters.
 
 The user (David) runs Arch Linux, knows Fusion 360 well, and writes German or English. The README is
-in German; code and comments are in English.
+in English with a German copy in `docs/README.de.md` – keep both in sync. Code and comments are in
+English.
 
 ## Build status
 
@@ -88,6 +89,8 @@ UI conventions:
   shortcuts stay in sync. `can_run` decides availability.
 - New solid/construction features go through `features_ui.rs`: add a `FeatureType`, its inputs in
   `FeatureSession::blank`, the mapping in `build` and `edit`. Picking/preview/dialog come for free.
+- Values are always shown with their unit (`dialogs::fmt_value`): "30 mm", "45°". Expression
+  fields append the unit to a plain number on focus loss (`dialogs::with_unit`); `°` parses as deg.
 - Icons come from `icons.rs` instead of Unicode glyphs (egui's bundled fonts lack most symbols).
 - Model-mode selection (`FerroApp::selection`) pre-fills commands that start from it.
 - Bodies are drawn by `render3d` with a real depth buffer. Translucent fills (face highlights,
