@@ -453,10 +453,20 @@ impl SketchSession {
         self.text_input = None;
     }
 
+    /// Selecting, with no shape, value or text being entered.
+    pub fn is_idle(&self) -> bool {
+        self.tool == Tool::Select
+            && self.clicks.is_empty()
+            && self.draw_input.is_none()
+            && self.text_input.is_none()
+            && self.inline.is_none()
+            && self.dragging.is_none()
+    }
+
     pub fn hint(&self) -> &'static str {
         let n = self.clicks.len();
         match self.tool {
-            Tool::Select => "Click to select (Shift adds) · drag points · double-click a dimension to edit · Del deletes",
+            Tool::Select => "Click to select (Shift adds) · drag points · double-click a dimension to edit · Del deletes · Enter finishes the sketch",
             Tool::Line if n == 0 => "Line: click the start point",
             Tool::Line => "Line: click the next point, or type length · Tab · angle · Enter · Esc ends the chain",
             Tool::Rectangle if n == 0 => "Rectangle: click the first corner",

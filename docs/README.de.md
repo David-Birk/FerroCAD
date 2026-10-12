@@ -130,8 +130,9 @@ Mausbelegung wie in Fusion 360:
 - F6 = Home, Shift+F = Einpassen
 - Rechtsklick = Kontextmenü passend zur Auswahl
 
-**Auswahl:** Flächen und Kanten im Modell anklicken (Shift = mehrere), Körper im Browser. Ein
-passender Befehl übernimmt die Auswahl.
+**Auswahl:** Flächen, Kanten und Skizzenprofile im Modell anklicken (Shift = mehrere), Körper im
+Browser. Ausgewählte Flächen und Profile werden hellblau gefüllt. Ein passender Befehl übernimmt die
+Auswahl (Profil wählen, E drücken). In einer Skizze beendet Enter sie, wenn kein Werkzeug beschäftigt ist.
 
 **Befehlssuche (S):** wie in Fusion – Befehl tippen, Enter führt ihn aus.
 

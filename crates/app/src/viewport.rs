@@ -393,17 +393,21 @@ impl FerroApp {
 
     /// Model mode: hover highlight and click selection of edges and faces.
     fn model_selection(&mut self, response: &egui::Response, painter: &egui::Painter, vp: &Viewport) {
+        // Like Fusion: edges first, then sketch profiles, then faces.
+        let sketches = self.visible_sketches();
         let hovered = response.hover_pos().and_then(|pos| {
             self.pick_edge(pos, vp)
                 .map(|(e, _)| Pick::Edge(e))
+                .or_else(|| self.pick_profile(pos, vp, &sketches).map(Pick::Profile))
                 .or_else(|| self.pick_face(pos, vp).map(|f| Pick::Face(f.face)))
         });
+        // Selected: blue fill; hovered: a lighter blue.
         for p in &self.selection {
-            self.draw_pick(painter, vp, p, crate::sketch_ui::COL_SELECTED);
+            self.draw_pick(painter, vp, p, theme::ACCENT);
         }
         if let Some(p) = &hovered {
             if !self.selection.contains(p) {
-                self.draw_pick(painter, vp, p, theme::ACCENT.gamma_multiply(0.8));
+                self.draw_pick(painter, vp, p, theme::ACCENT.gamma_multiply(0.55));
             }
         }
         let additive = response.ctx.input(|i| i.modifiers.shift || i.modifiers.command);

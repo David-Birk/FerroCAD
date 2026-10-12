@@ -1479,3 +1479,56 @@ fn planes_have_a_fixed_size_in_the_model() {
     assert!(far < near * 0.6, "zooming out shrinks the planes on screen: {near} → {far}");
     assert!((h.state().plane_size() - 36.0).abs() < 1e-9, "the size itself doesn't follow the zoom");
 }
+
+#[test]
+fn enter_finishes_an_idle_sketch() {
+    let mut h = harness();
+    h.state_mut().start_sketch_on(PlaneRef::Origin(OriginPlane::XY));
+    h.run_steps(15);
+    run(&mut h, Command::Sketch(SketchCommand::Tool(Tool::Rectangle)));
+    click_at(&mut h, [0.0, 0.0, 0.0]);
+    // Enter while drawing creates the shape, it doesn't leave the sketch.
+    click_at(&mut h, [20.0, 10.0, 0.0]);
+    press(&mut h, Key::Enter);
+    assert!(matches!(h.state().mode, Mode::Sketch(_)), "still sketching with a tool active");
+    press(&mut h, Key::Escape);
+    let Mode::Sketch(s) = &h.state().mode else { panic!() };
+    assert!(s.is_idle());
+    press(&mut h, Key::Enter);
+    assert!(matches!(h.state().mode, Mode::Model), "Enter finishes the sketch");
+    assert_eq!(h.state().doc.features().len(), 1);
+}
+
+#[test]
+fn profiles_and_faces_select_with_a_blue_fill() {
+    let mut h = harness();
+    let mut sf = ferrocad_model::SketchFeature::new(ferrocad_model::Plane::XY);
+    sf.sketch.add_rectangle([0.0, 0.0], [30.0, 20.0]);
+    h.state_mut().doc.add("Sketch1", FeatureKind::Sketch(sf));
+    h.state_mut().rebuild();
+    run(&mut h, Command::Home);
+    h.run_steps(15);
+    h.state_mut().gpu = true; // collect fills in the overlay (no paint callback headless)
+    click_at(&mut h, [15.0, 10.0, 0.0]);
+    assert!(matches!(h.state().selection.as_slice(), [Pick::Profile(_)]), "{:?}", h.state().selection);
+    h.run_steps(2);
+    let fill: Vec<[f32; 4]> = h.state().overlay.lock().unwrap().as_chunks::<8>().0.iter().map(|v| [v[3], v[4], v[5], v[6]]).collect();
+    assert!(!fill.is_empty(), "the selected profile is filled");
+    assert!(fill.iter().all(|c| c[2] > c[0] && c[3] < 0.6), "light blue: {:?}", fill[0]);
+    h.state_mut().gpu = false;
+
+    // E extrudes the selected profile right away.
+    run(&mut h, Command::Extrude);
+    assert!(matches!(&h.state().mode, Mode::Extrude(e) if e.profile_point.is_some_and(|p| (p[0] - 15.0).abs() < 0.5 && (p[1] - 10.0).abs() < 0.5)));
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    assert_eq!(h.state().bodies.len(), 1);
+
+    // A face is filled blue as well.
+    h.state_mut().gpu = true;
+    click_at(&mut h, [15.0, 10.0, 10.0]);
+    assert!(matches!(h.state().selection.as_slice(), [Pick::Face(_)]), "{:?}", h.state().selection);
+    h.run_steps(2);
+    let fill: Vec<[f32; 4]> = h.state().overlay.lock().unwrap().as_chunks::<8>().0.iter().map(|v| [v[3], v[4], v[5], v[6]]).collect();
+    assert!(!fill.is_empty() && fill.iter().all(|c| c[2] > c[0]), "blue face fill");
+}

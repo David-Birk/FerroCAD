@@ -902,6 +902,8 @@ impl FerroApp {
     }
 
     /// Highlight a pick in the viewport.
+    /// Highlight a pick: faces and profiles get a translucent fill (`FILL` of
+    /// `color`), edges and curves a thick line.
     pub fn draw_pick(&self, painter: &egui::Painter, vp: &Viewport, pick: &Pick, color: Color32) {
         let line = |pts: Vec<Pos2>, w: f32| {
             painter.add(egui::Shape::line(pts, Stroke::new(w, color)));
@@ -913,7 +915,7 @@ impl FerroApp {
                     if self.gpu {
                         for tri in tris {
                             let p = [0, 1, 2].map(|k| mesh.positions[mesh.indices[tri * 3 + k] as usize]);
-                            crate::render3d::push_triangle(&self.overlay, p, color.gamma_multiply(0.55), true);
+                            crate::render3d::push_triangle(&self.overlay, p, color.gamma_multiply(FILL), true);
                         }
                         return;
                     }
@@ -926,7 +928,7 @@ impl FerroApp {
                         if pts.len() == 3 {
                             let base = overlay.vertices.len() as u32;
                             for p in pts {
-                                overlay.colored_vertex(p, color.gamma_multiply(0.5));
+                                overlay.colored_vertex(p, color.gamma_multiply(FILL));
                             }
                             overlay.add_triangle(base, base + 1, base + 2);
                         }
@@ -955,6 +957,26 @@ impl FerroApp {
                 let Some(sf) = self.doc.sketch(p.sketch) else { return };
                 let profiles = find_profiles(&sf.sketch);
                 if let Some(i) = profile_at(&profiles, p.point) {
+                    // Fill the region, then outline it.
+                    let holes: Vec<Vec<[f64; 2]>> = profiles[i].holes.iter().map(|h| h.polygon()).collect();
+                    let tris = ferrocad_view::triangulate::triangulate(&profiles[i].outer.polygon(), &holes);
+                    let fill = color.gamma_multiply(FILL);
+                    let mut mesh = egui::Mesh::default();
+                    for t in tris {
+                        let w = t.map(|uv| sf.plane.to_world(uv));
+                        if self.gpu {
+                            crate::render3d::push_triangle(&self.overlay, w, fill, false);
+                        } else if let [Some(a), Some(b), Some(c)] = w.map(|q| self.to_screen(q, vp)) {
+                            let base = mesh.vertices.len() as u32;
+                            for q in [a, b, c] {
+                                mesh.colored_vertex(q, fill);
+                            }
+                            mesh.add_triangle(base, base + 1, base + 2);
+                        }
+                    }
+                    if !mesh.vertices.is_empty() {
+                        painter.add(mesh);
+                    }
                     for lp in std::iter::once(&profiles[i].outer).chain(&profiles[i].holes) {
                         let mut pts: Vec<Pos2> =
                             lp.polygon().iter().filter_map(|uv| self.to_screen(sf.plane.to_world(*uv), vp)).collect();
@@ -1288,6 +1310,9 @@ impl FerroApp {
         }
     }
 }
+
+/// Opacity of face and profile highlight fills.
+const FILL: f32 = 0.4;
 
 /// Short text for a single pick.
 pub fn pick_label(p: &Pick) -> String {

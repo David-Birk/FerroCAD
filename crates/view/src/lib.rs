@@ -6,6 +6,8 @@
 //! A wgpu pipeline with a real depth buffer can later replace that without
 //! touching this crate's camera or picking.
 
+pub mod triangulate;
+
 use ferrocad_model::geom::{add, cross, dot, normalize, scale, sub, Vec3};
 use ferrocad_model::TriMesh;
 

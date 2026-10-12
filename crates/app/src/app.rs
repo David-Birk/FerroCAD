@@ -744,7 +744,15 @@ impl FerroApp {
                 self.info("Create Sketch: select a plane or a flat face");
             }
             Command::Extrude => {
-                self.mode = Mode::Extrude(ExtrudeSession::new(&self.doc));
+                let mut sess = ExtrudeSession::new(&self.doc);
+                // A selected sketch profile is the one to extrude.
+                if let Some(Pick::Profile(p)) = self.selection.iter().find(|p| matches!(p, Pick::Profile(_))) {
+                    sess.sketch = Some(p.sketch);
+                    sess.profile_point = Some(p.point);
+                    let on_face = self.doc.sketch(p.sketch).is_some_and(|s| matches!(s.attach, Some(ferrocad_model::PlaneRef::Face(_))));
+                    sess.operation = if on_face { ferrocad_model::Operation::Join } else { ferrocad_model::Operation::NewBody };
+                }
+                self.mode = Mode::Extrude(sess);
                 self.message = None;
             }
             Command::Revolve => {
@@ -896,6 +904,8 @@ impl FerroApp {
             return;
         }
         let in_sketch = matches!(self.mode, Mode::Sketch(_));
+        // Nothing in progress in the sketch: Enter finishes it, like Fusion.
+        let sketch_idle = matches!(&self.mode, Mode::Sketch(s) if s.is_idle());
         let mut commands = Vec::new();
         ctx.input(|i| {
             let cmd = i.modifiers.command;
@@ -927,6 +937,10 @@ impl FerroApp {
                 return;
             }
             if in_sketch {
+                if sketch_idle && key(egui::Key::Enter) {
+                    commands.push(Command::FinishSketch);
+                    return;
+                }
                 commands.extend(crate::sketch_ui::sketch_shortcut(i).map(Command::Sketch));
             } else {
                 if key(egui::Key::E) {

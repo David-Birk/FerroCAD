@@ -124,8 +124,9 @@ Same mouse mapping as Fusion 360:
 - F6 = home, Shift+F = fit
 - Right-click = context menu for the selection
 
-**Selection:** click faces and edges in the model (Shift = several), bodies in the browser. A matching
-command takes over the selection.
+**Selection:** click faces, edges and sketch profiles in the model (Shift = several), bodies in the
+browser. Selected faces and profiles get a light blue fill. A matching command takes over the selection
+(select a profile, press E). In a sketch, Enter finishes it when no tool is busy.
 
 **Command search (S):** like in Fusion – type a command, Enter runs it.
 
