@@ -121,9 +121,11 @@ Oberflächen-Tests, die ganze Arbeitsabläufe per simulierten Klicks durchspiele
 
 **Navigation:**
 
-- Rechte Maustaste ziehen = Orbit
-- Mittlere Maustaste = Pan (Shift+Mitte = Orbit)
-- Mausrad = Zoom zum Cursor
+Mausbelegung wie in Fusion 360:
+
+- Mittlere Maustaste ziehen = Pan
+- Shift + mittlere Maustaste ziehen = Orbit
+- Mausrad = Zoom zum Cursor; Doppelklick mit der mittleren Taste = Einpassen
 - ViewCube: Flächen, Kanten und Ecken anklicken
 - F6 = Home, Shift+F = Einpassen
 - Rechtsklick = Kontextmenü passend zur Auswahl

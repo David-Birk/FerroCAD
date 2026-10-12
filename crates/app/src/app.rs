@@ -960,7 +960,7 @@ impl FerroApp {
     /// Hint for the status bar when no message is shown.
     fn hint(&self) -> String {
         match &self.mode {
-            Mode::Model => "Right-drag: orbit · Middle-drag: pan · Wheel: zoom · Right-click: menu".into(),
+            Mode::Model => "Shift+middle-drag: orbit · Middle-drag: pan · Wheel: zoom · Right-click: menu".into(),
             Mode::PickPlane => "Select a plane or a flat face to sketch on (Esc to cancel)".into(),
             Mode::Sketch(sess) => sess.hint().into(),
             Mode::Extrude(_) => "Click inside a profile, set the distance, then OK (Enter)".into(),

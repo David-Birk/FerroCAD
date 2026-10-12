@@ -1375,3 +1375,60 @@ fn sketch_text_extrudes() {
     let text = ferrocad_model::io::save(&h.state().doc);
     assert_eq!(ferrocad_model::io::save(&ferrocad_model::io::load(&text).unwrap()), text);
 }
+
+#[test]
+fn fusion_mouse_navigation() {
+    let mut h = harness();
+    box_model(&mut h);
+    let drag_with = |h: &mut Harness<'static, FerroApp>, button: PointerButton, shift: bool| {
+        let from = h.state().viewport_rect.center() + egui::vec2(-150.0, 120.0);
+        let mods = egui::Modifiers { shift, ..Default::default() };
+        h.event(Event::ModifiersChanged(mods));
+        h.event(Event::PointerMoved(from));
+        h.event(Event::PointerButton { pos: from, button, pressed: true, modifiers: mods });
+        h.run_steps(1);
+        for k in 1..=5 {
+            let p = from + egui::vec2(12.0 * k as f32, 6.0 * k as f32);
+            h.event(Event::PointerMoved(p));
+            h.run_steps(1);
+        }
+        let to = from + egui::vec2(60.0, 30.0);
+        h.event(Event::PointerButton { pos: to, button, pressed: false, modifiers: mods });
+        h.run_steps(2);
+        h.event(Event::ModifiersChanged(Default::default()));
+    };
+    let before = h.state().camera;
+    // Right button: context menu, no orbit.
+    drag_with(&mut h, PointerButton::Secondary, false);
+    assert_eq!(h.state().camera.eye(), before.eye(), "right-drag must not orbit");
+    press(&mut h, Key::Escape);
+    // Middle: pan keeps the view direction.
+    drag_with(&mut h, PointerButton::Middle, false);
+    let panned = h.state().camera;
+    assert_ne!(panned.target, before.target);
+    let dir = |c: &ferrocad_view::Camera| ferrocad_model::geom::normalize(ferrocad_model::geom::sub(c.eye(), c.target));
+    assert!(ferrocad_model::geom::distance(dir(&panned), dir(&before)) < 1e-9);
+    // Shift + middle: orbit.
+    drag_with(&mut h, PointerButton::Middle, true);
+    assert!(ferrocad_model::geom::distance(dir(&h.state().camera), dir(&panned)) > 1e-3, "shift+middle orbits");
+}
+
+#[test]
+fn active_sketch_tool_follows_the_cursor() {
+    let mut h = harness();
+    h.state_mut().start_sketch_on(PlaneRef::Origin(OriginPlane::XY));
+    h.run_steps(15);
+    let p = screen(h.state(), [10.0, 10.0, 0.0]);
+    h.event(Event::PointerMoved(p));
+    press(&mut h, Key::R);
+    h.run_steps(2);
+    let Mode::Sketch(s) = &h.state().mode else { panic!() };
+    assert_eq!(s.tool, Tool::Rectangle);
+    assert_eq!(s.tool.icon(), Some(crate::icons::Icon::Rectangle));
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Crosshair);
+    press(&mut h, Key::Escape);
+    h.run_steps(2);
+    let Mode::Sketch(s) = &h.state().mode else { panic!() };
+    assert_eq!(s.tool, Tool::Select);
+    assert_eq!(s.tool.icon(), None, "no badge for Select");
+}

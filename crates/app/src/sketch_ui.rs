@@ -138,6 +138,34 @@ pub enum Tool {
 }
 
 impl Tool {
+    /// The tool's ribbon icon (None for Select).
+    pub fn icon(self) -> Option<Icon> {
+        Some(match self {
+            Tool::Select => return None,
+            Tool::Line => Icon::Line,
+            Tool::Rectangle => Icon::Rectangle,
+            Tool::Circle => Icon::Circle,
+            Tool::Arc => Icon::Arc,
+            Tool::Dimension => Icon::Dimension,
+            Tool::Constrain(k) => k.icon(),
+            Tool::CenterRectangle => Icon::CenterRect,
+            Tool::Arc3 => Icon::Arc3,
+            Tool::Polygon => Icon::Polygon,
+            Tool::Slot => Icon::Slot,
+            Tool::Trim => Icon::Trim,
+            Tool::Extend => Icon::Extend,
+            Tool::Fillet => Icon::Fillet,
+            Tool::Offset => Icon::Offset,
+            Tool::Mirror => Icon::Mirror,
+            Tool::CircPattern => Icon::CircPattern,
+            Tool::RectPattern => Icon::RectPattern,
+            Tool::Project => Icon::Project,
+            Tool::Spline => Icon::Spline,
+            Tool::Point => Icon::Point,
+            Tool::Text => Icon::Text,
+        })
+    }
+
     fn is_drawing(self) -> bool {
         matches!(
             self,
@@ -1090,6 +1118,19 @@ fn layout_badges(sk: &Sketch, pr: &Projector, centre: Pos2) -> Vec<Badge> {
 // ------------------------------------------------------------- viewport part
 
 impl FerroApp {
+    /// Like Fusion: the active tool's icon follows the cursor, and drawing
+    /// tools get a crosshair, so you always see which tool is on.
+    pub fn sketch_cursor_badge(&self, response: &egui::Response, painter: &egui::Painter) {
+        let Mode::Sketch(sess) = &self.mode else { return };
+        let (Some(icon), Some(pos)) = (sess.tool.icon(), response.hover_pos()) else { return };
+        if sess.tool.is_drawing() || sess.tool == Tool::Text {
+            response.ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        let rect = egui::Rect::from_min_size(pos + egui::vec2(14.0, 14.0), egui::vec2(22.0, 22.0));
+        painter.rect(rect, 4.0, theme::WINDOW.gamma_multiply(0.9), Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
+        icons::paint(painter, rect.shrink(2.0), icon, theme::ICON, true);
+    }
+
     pub fn sketch_viewport(
         &mut self,
         ui: &egui::Ui,

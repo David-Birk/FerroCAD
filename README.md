@@ -115,9 +115,11 @@ tests that play through whole workflows with simulated clicks).
 
 **Navigation:**
 
-- Drag with the right mouse button = orbit
-- Middle mouse button = pan (Shift+middle = orbit)
-- Mouse wheel = zoom to the cursor
+Same mouse mapping as Fusion 360:
+
+- Middle mouse button drag = pan
+- Shift + middle mouse button drag = orbit
+- Mouse wheel = zoom to the cursor; double-click the middle button = fit
 - ViewCube: click faces, edges and corners
 - F6 = home, Shift+F = fit
 - Right-click = context menu for the selection

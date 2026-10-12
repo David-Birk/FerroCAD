@@ -68,17 +68,19 @@ impl FerroApp {
             height: rect.height().max(1.0) as f64,
         };
 
-        // ---- navigation (Fusion-like: middle = pan, shift+middle/right = orbit)
+        // ---- navigation, Fusion's mapping: middle = pan, Shift+middle = orbit,
+        // wheel = zoom, double-click middle = fit; right click is the menu.
         let shift = ui.input(|i| i.modifiers.shift);
         let delta = response.drag_delta();
-        if response.dragged_by(egui::PointerButton::Secondary)
-            || (shift && response.dragged_by(egui::PointerButton::Middle))
-        {
+        if shift && response.dragged_by(egui::PointerButton::Middle) {
             self.stop_camera_animation();
             self.camera.orbit(delta.x as f64, delta.y as f64);
         } else if response.dragged_by(egui::PointerButton::Middle) {
             self.stop_camera_animation();
             self.camera.pan(delta.x as f64, delta.y as f64, &vp);
+        }
+        if response.double_clicked_by(egui::PointerButton::Middle) {
+            self.run(Command::Fit);
         }
         if let Some(hover) = response.hover_pos() {
             let scroll = ui.input(|i| i.smooth_scroll_delta().y) as f64;
@@ -119,7 +121,10 @@ impl FerroApp {
             ModeKind::PickPlane => self.pick_sketch_plane(&response, &painter, &vp),
             ModeKind::Feature => self.feature_viewport(&response, &painter, &vp),
             ModeKind::Measure => self.measure_viewport(&response, &painter, &vp),
-            ModeKind::Sketch => self.sketch_viewport(ui, &response, &painter, &vp),
+            ModeKind::Sketch => {
+                self.sketch_viewport(ui, &response, &painter, &vp);
+                self.sketch_cursor_badge(&response, &painter);
+            }
             ModeKind::Extrude => self.extrude_viewport(&response, &painter, &vp),
             ModeKind::Revolve => self.revolve_viewport(&response, &painter, &vp),
             ModeKind::Fillet => self.fillet_viewport(&response, &painter, &vp),
