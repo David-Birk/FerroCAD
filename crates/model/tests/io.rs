@@ -11,6 +11,9 @@ fn full_document() -> Document {
 
     let mut hole = SketchFeature::new(Plane::from_normal([0.0, 0.0, 5.0], [0.0, 0.0, 1.0]));
     hole.sketch.add_circle([20.0, 10.0], 3.0);
+    // A standalone point and exploded (fixed) text-like geometry.
+    hole.sketch.add_point_entity([5.0, 5.0]);
+    hole.sketch.add_fixed_polygon(&[[100.0, 0.0], [104.0, 0.0], [102.0, 3.0]]);
     let hole_sketch = doc.add("Hole sketch", FeatureKind::Sketch(hole));
     doc.add(
         "Hole",

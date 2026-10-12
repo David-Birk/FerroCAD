@@ -30,8 +30,9 @@ navigation bar · timeline · status bar with hints for the active tool.
 - **Create a sketch:** click an origin plane, a construction plane or a **flat face of a body**.
   Sketches on faces and construction planes follow the model when it changes.
 - **Tools:** line (L), rectangle (R), centre rectangle, circle (C), arc (A), 3-point arc, polygon,
-  slot, **spline** (click fit points; Enter or double-click finishes), project (P) body edges (purple;
-  lines, circles and arcs follow the model).
+  slot, **spline** (click fit points; Enter or double-click finishes), **point** (e.g. hole positions),
+  **text** (click the start of the baseline, type text and height; the letters become profiles you can
+  extrude or cut), project (P) body edges (purple; lines, circles and arcs follow the model).
 - **Type values while drawing:** after the first click, input fields appear at the geometry
   (length/angle, width/height, diameter). Type a value, **Tab** to the next field, **Enter** creates the
   shape. Typed values become real dimensions, parameters included (`width / 2`).
@@ -181,4 +182,5 @@ project is made is explained in the [disclaimer](docs/DISCLAIMER.md).
 
 ## License
 
-GPL-3.0-or-later. OpenCascade (OCCT) and opencascade-rs are LGPL-2.1.
+GPL-3.0-or-later. OpenCascade (OCCT) and opencascade-rs are LGPL-2.1. Sketch text uses the Ubuntu
+font bundled with egui (Ubuntu Font Licence 1.0).

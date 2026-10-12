@@ -418,6 +418,36 @@ fn screenshots() {
     shot(&mut h, "11_draft_dialog");
     press(&mut h, Key::Enter);
     no_errors(h.state());
+
+    // Text and points on a new sketch, then holes on the points.
+    h.state_mut().start_sketch_on(PlaneRef::Origin(OriginPlane::XY));
+    h.run_steps(15);
+    run(&mut h, Command::Sketch(SketchCommand::Tool(Tool::Text)));
+    click_at(&mut h, [5.0, -30.0, 0.0]);
+    type_text(&mut h, "Voron 2.4");
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.text_height = "8 mm".into();
+    }
+    h.run_steps(5);
+    shot(&mut h, "12_sketch_text");
+    press(&mut h, Key::Enter);
+    run(&mut h, Command::Sketch(SketchCommand::Tool(Tool::Point)));
+    for x in [10.0, 20.0, 30.0] {
+        click_at(&mut h, [x, 12.0, 0.0]);
+    }
+    run(&mut h, Command::FinishSketch);
+    run(&mut h, Command::Feature(FeatureType::Hole));
+    for x in [10.0, 20.0, 30.0] {
+        click_at(&mut h, [x, 12.0, 0.0]);
+    }
+    if let Mode::Feature(s) = &mut h.state_mut().mode {
+        s.flags[0].1 = true;
+        s.flags[1].1 = true;
+    }
+    run(&mut h, Command::Home);
+    h.run_steps(15);
+    shot(&mut h, "13_holes_on_points");
+    press(&mut h, Key::Enter);
 }
 
 #[test]
@@ -1239,6 +1269,109 @@ fn holes_on_sketch_points_and_pattern_features() {
     h.run_steps(2);
     assert!(matches!(&h.state().mode, Mode::Feature(s) if s.pattern_features && s.features == vec![hole_id]));
     press(&mut h, Key::Escape);
+    let text = ferrocad_model::io::save(&h.state().doc);
+    assert_eq!(ferrocad_model::io::save(&ferrocad_model::io::load(&text).unwrap()), text);
+}
+
+#[test]
+fn point_tool_places_hole_positions() {
+    let mut h = harness();
+    box_model(&mut h);
+    let v0 = volume(h.state());
+    run(&mut h, Command::CreateSketch);
+    click_at(&mut h, [15.0, 10.0, 10.0]);
+    h.run_steps(15);
+    let Mode::Sketch(sess) = &h.state().mode else { panic!("no sketch") };
+    let plane = h.state().doc.sketch(sess.feature).unwrap().plane;
+    run(&mut h, Command::Sketch(SketchCommand::Tool(Tool::Point)));
+    click_at(&mut h, [10.0, 10.0, 10.0]);
+    click_at(&mut h, [20.0, 10.0, 10.0]);
+    let Mode::Sketch(sess) = &h.state().mode else { panic!("left the sketch") };
+    let sk = &h.state().doc.sketch(sess.feature).unwrap().sketch;
+    let points: Vec<[f64; 2]> = sk
+        .entities()
+        .filter_map(|(_, e)| if let ferrocad_sketch::Entity::Point { p } = e { Some(sk.point_pos(*p)) } else { None })
+        .collect();
+    assert_eq!(points.len(), 2, "two standalone points");
+    let w = plane.to_world(points[0]);
+    assert!((w[0] - 10.0).abs() < 1e-6 && (w[1] - 10.0).abs() < 1e-6, "{w:?}");
+    run(&mut h, Command::FinishSketch);
+
+    run(&mut h, Command::Feature(FeatureType::Hole));
+    click_at(&mut h, [10.0, 10.0, 10.0]);
+    click_at(&mut h, [20.0, 10.0, 10.0]);
+    if let Mode::Feature(s) = &mut h.state_mut().mode {
+        assert_eq!(s.sels[0].picks.len(), 2, "{:?}", s.sels[0].picks);
+        s.exprs[0].text = "4".into();
+        s.exprs[1].text = "5".into();
+    }
+    h.run_steps(2);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    let hole = std::f64::consts::PI * 4.0 * 5.0;
+    assert!((volume(h.state()) - (v0 - 2.0 * hole)).abs() < 1e-3, "{}", volume(h.state()));
+}
+
+#[test]
+fn sketch_text_extrudes() {
+    let mut h = harness();
+    h.state_mut().start_sketch_on(PlaneRef::Origin(OriginPlane::XY));
+    h.run_steps(15);
+    run(&mut h, Command::Sketch(SketchCommand::Tool(Tool::Text)));
+    click_at(&mut h, [0.0, 0.0, 0.0]);
+    assert!(matches!(&h.state().mode, Mode::Sketch(s) if s.text_input.is_some()));
+    type_text(&mut h, "Ho");
+    if let Mode::Sketch(s) = &mut h.state_mut().mode {
+        s.text_height = "10 mm".into();
+    }
+    h.run_steps(2);
+    press(&mut h, Key::Enter);
+    let Mode::Sketch(sess) = &h.state().mode else { panic!("left the sketch") };
+    assert!(sess.text_input.is_none(), "{:?}", h.state().message);
+    let sk = h.state().doc.sketch(sess.feature).unwrap().sketch.clone();
+    let profiles = ferrocad_sketch::find_profiles(&sk);
+    // H, and o with its counter (plus the counter's own disk).
+    assert_eq!(profiles.len(), 3, "{}", profiles.len());
+    // Undo removes the whole text in one step.
+    run(&mut h, Command::Undo);
+    let Mode::Sketch(sess) = &h.state().mode else { panic!("left the sketch") };
+    assert_eq!(h.state().doc.sketch(sess.feature).unwrap().sketch.entities().count(), 0);
+    run(&mut h, Command::Redo);
+    run(&mut h, Command::FinishSketch);
+
+    // Extrude every letter body (the profiles with the larger areas).
+    let sketch = h.state().doc.features()[0].id;
+    let mut picks: Vec<&ferrocad_sketch::Profile> = profiles.iter().collect();
+    picks.sort_by(|a, b| b.area().total_cmp(&a.area()));
+    for p in picks.iter().take(2) {
+        let poly = p.outer.polygon();
+        let inside = (0..400)
+            .map(|k| {
+                let (a, b) = (poly[k % poly.len()], poly[(k * 7 + 3) % poly.len()]);
+                [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]
+            })
+            .find(|q| ferrocad_sketch::profile::profile_at(&profiles, *q).is_some_and(|i| std::ptr::eq(&profiles[i], *p)))
+            .expect("a point inside the letter");
+        h.state_mut().doc.add(
+            "Extrude",
+            FeatureKind::Extrude(ferrocad_model::ExtrudeFeature {
+                sketch,
+                profile_point: inside,
+                distance: "2".into(),
+                symmetric: false,
+                operation: ferrocad_model::Operation::NewBody,
+                distance2: None,
+                taper: "0".into(),
+                extent: ferrocad_model::ExtrudeExtent::Distance,
+                thin: None,
+            }),
+        );
+    }
+    h.state_mut().rebuild();
+    no_errors(h.state());
+    assert_eq!(h.state().bodies.len(), 2);
+    let total: f64 = picks.iter().take(2).map(|p| p.area() * 2.0).sum();
+    assert!((volume(h.state()) - total).abs() < 0.01 * total, "{} vs {total}", volume(h.state()));
     let text = ferrocad_model::io::save(&h.state().doc);
     assert_eq!(ferrocad_model::io::save(&ferrocad_model::io::load(&text).unwrap()), text);
 }

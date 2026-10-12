@@ -58,6 +58,8 @@ pub enum Icon {
     Arc3,
     Project,
     Spline,
+    Point,
+    Text,
     Finish,
     Cancel,
     // constraints
@@ -477,6 +479,20 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32, enabled:
             for q in [(0.1, 0.5), (0.3, 0.2), (0.7, 0.8), (0.9, 0.5)] {
                 p.dot(q, 0.06, a);
             }
+        }
+        Point => {
+            p.line(&[(0.5, 0.15), (0.5, 0.35)], faded(c, 140));
+            p.line(&[(0.5, 0.65), (0.5, 0.85)], faded(c, 140));
+            p.line(&[(0.15, 0.5), (0.35, 0.5)], faded(c, 140));
+            p.line(&[(0.65, 0.5), (0.85, 0.5)], faded(c, 140));
+            p.dot((0.5, 0.5), 0.1, a);
+        }
+        Text => {
+            p.thick(&[(0.14, 0.86), (0.38, 0.14), (0.62, 0.86)], c, 1.6);
+            p.line(&[(0.23, 0.6), (0.53, 0.6)], c);
+            p.line(&[(0.62, 0.86), (0.92, 0.86)], a);
+            p.line(&[(0.77, 0.86), (0.77, 0.36)], a);
+            p.line(&[(0.66, 0.36), (0.88, 0.36)], a);
         }
         Project => {
             p.poly(&[(0.1, 0.8), (0.62, 0.8), (0.9, 0.6), (0.38, 0.6)], faded(theme::ORANGE, 90), Some(theme::ORANGE));

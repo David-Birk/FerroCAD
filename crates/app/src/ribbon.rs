@@ -77,6 +77,8 @@ const SKETCH_CREATE_MORE: &[Entry] = &[
     Entry(tool(Tool::Polygon), Icon::Polygon, "Polygon", "Regular polygon (sides in the palette)"),
     Entry(tool(Tool::Spline), Icon::Spline, "Spline", "Fit-point spline – Enter or double-click to finish"),
     Entry(tool(Tool::Slot), Icon::Slot, "Slot", "Centre-to-centre slot"),
+    Entry(tool(Tool::Point), Icon::Point, "Point", "Sketch point, e.g. to place holes on"),
+    Entry(tool(Tool::Text), Icon::Text, "Text", "Text as sketch outlines – click where it starts"),
     Entry(tool(Tool::Project), Icon::Project, "Project", "Bring body edges into the sketch (P)"),
 ];
 const SKETCH_MODIFY_MORE: &[Entry] = &[

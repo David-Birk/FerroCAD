@@ -32,8 +32,10 @@ aktiven Werkzeug.
 - **Skizze erstellen:** Ursprungsebene, Konstruktionsebene oder eine **ebene Körperfläche** anklicken.
   Skizzen auf Flächen und Konstruktionsebenen wandern mit, wenn sich das Modell ändert.
 - **Werkzeuge:** Linie (L), Rechteck (R), Mittelpunkt-Rechteck, Kreis (C), Bogen (A), 3-Punkt-Bogen,
-  Polygon, Langloch, **Spline** (Stützpunkte klicken, Enter/Doppelklick beendet), Projizieren (P) von
-  Körperkanten (lila; Linien, Kreise und Bögen folgen dem Modell).
+  Polygon, Langloch, **Spline** (Stützpunkte klicken, Enter/Doppelklick beendet), **Punkt** (z. B. für
+  Bohrungspositionen), **Text** (Anfang der Grundlinie klicken, Text und Höhe tippen; die Buchstaben
+  werden Profile zum Extrudieren oder Ausschneiden), Projizieren (P) von Körperkanten (lila; Linien,
+  Kreise und Bögen folgen dem Modell).
 - **Werte direkt eintippen:** Nach dem ersten Klick erscheinen Eingabefelder an der Geometrie
   (Länge/Winkel, Breite/Höhe, Durchmesser) – Wert tippen, **Tab** zum nächsten Feld, **Enter** erzeugt
   die Form. Getippte Werte werden echte Bemaßungen, auch mit Parametern (`breite / 2`).
@@ -187,4 +189,5 @@ Gedanken, Verbesserungen und Feedback sind willkommen – einfach ein Issue oder
 
 ## Lizenz
 
-GPL-3.0-or-later. OpenCascade (OCCT) und opencascade-rs stehen unter LGPL-2.1.
+GPL-3.0-or-later. OpenCascade (OCCT) und opencascade-rs stehen unter LGPL-2.1. Skizzentext nutzt die
+mit egui gelieferte Schrift Ubuntu (Ubuntu Font Licence 1.0).

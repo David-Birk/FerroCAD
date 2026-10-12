@@ -167,14 +167,27 @@ impl FerroApp {
         best.map(|(_, s, e)| (s, e))
     }
 
-    /// Points of the given sketches that holes can sit on: ends, centres and
-    /// fit points of live curves, plus standalone points.
+    /// Points of a sketch that holes can sit on: standalone points, circle
+    /// and arc centres, and free curve points. Fixed corners of exploded
+    /// text or projected outlines are left out.
     pub fn sketch_points(&self, sketch: FeatureId) -> Vec<PointId> {
+        use ferrocad_sketch::Entity;
         let Some(sf) = self.doc.sketch(sketch) else { return vec![] };
-        let mut used: Vec<PointId> = sf.sketch.entities().flat_map(|(_, e)| e.points()).collect();
-        used.sort_by_key(|p| p.0);
-        used.dedup();
-        used
+        let sk = &sf.sketch;
+        let mut pts: Vec<PointId> = sk
+            .entities()
+            .flat_map(|(_, e)| match *e {
+                Entity::Point { p } => vec![p],
+                Entity::Circle { center, .. } => vec![center],
+                Entity::Arc { center, start, end } => {
+                    [center].into_iter().chain([start, end].into_iter().filter(|q| !sk.is_point_fixed(*q))).collect()
+                }
+                _ => e.points().into_iter().filter(|q| !sk.is_point_fixed(*q)).collect(),
+            })
+            .collect();
+        pts.sort_by_key(|p| p.0);
+        pts.dedup();
+        pts
     }
 
     /// The sketch point under the cursor.

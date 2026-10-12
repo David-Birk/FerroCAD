@@ -113,6 +113,10 @@ Dependency direction: `sketch` ← `model` ← `view`, and `kernel-occt` ← `ap
 - **Ids are indices that never shift.** Deleted entities and constraints keep their slot
   (`alive=false` / `None`). `SketchFeature::driven` stores `ConstraintId`s; after sketch ops that
   delete constraints, drop stale `driven` entries (the UI does this when a sketch changes).
+- **Sketch points and text:** `Entity::Point { p }` is a standalone point (Point tool, hole
+  positions). Text (`app/src/text.rs`, `ttf-parser` + egui's bundled Ubuntu font) is "exploded":
+  glyph contours flattened to closed polygons of fixed lines (`Sketch::add_fixed_polygon`), so they
+  cost the solver nothing; counters become holes via the normal region finder.
 - **Splines** are fit-point centripetal Catmull–Rom curves (`spline_samples`); kernels get dense
   points (`Seg3::Spline`) and interpolate a B-spline (`GeomAPI_Interpolate`).
 - **Profile selection is a point inside the region** (`ProfileRef`), not an index.
@@ -180,7 +184,7 @@ Dependency direction: `sketch` ← `model` ← `view`, and `kernel-occt` ← `ap
 4. Section view has no cap faces (only an outline).
 5. Solver performance: analytic Jacobians and sparse linear algebra for large sketches.
 6. Missing Fusion features: component origins/own timelines, contact sets, threads,
-   drawings, sheet metal, sketch text.
+   drawings, sheet metal; sketch text is not editable as text after placing it.
 
 ## Conventions
 

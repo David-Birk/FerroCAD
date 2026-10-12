@@ -436,6 +436,7 @@ fn sketch_to_json(sk: &Sketch) -> Json {
                     ("type".into(), "spline".into()),
                     ("points".into(), points.iter().map(|p| p.0).collect::<Vec<_>>().into()),
                 ],
+                Entity::Point { p } => vec![("type".into(), "point".into()), ("p".into(), p.0.into())],
             };
             f.push(("construction".into(), e.construction.into()));
             f.push(("alive".into(), e.alive.into()));
@@ -878,6 +879,7 @@ fn sketch_from_json(j: &Json) -> R<Sketch> {
                         .map(|p| p.as_usize().map(PointId))
                         .collect::<Result<_, _>>()?,
                 },
+                "point" => Entity::Point { p: pid(e, "p")? },
                 other => return Err(LoadError(format!("unknown entity type '{other}'"))),
             };
             Ok(EntityData {

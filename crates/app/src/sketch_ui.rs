@@ -133,6 +133,8 @@ pub enum Tool {
     RectPattern,
     Project,
     Spline,
+    Point,
+    Text,
 }
 
 impl Tool {
@@ -148,6 +150,7 @@ impl Tool {
                 | Tool::Polygon
                 | Tool::Slot
                 | Tool::Spline
+                | Tool::Point
         )
     }
 
@@ -247,7 +250,7 @@ fn stick_to_curve(sk: &mut Sketch, p: PointId, e: EntityId) {
     let c = match sk.entity(e) {
         Entity::Line { .. } => Constraint::PointOnLine(p, e),
         Entity::Circle { .. } | Entity::Arc { .. } => Constraint::PointOnCircle(p, e),
-        Entity::Spline { .. } => return,
+        Entity::Spline { .. } | Entity::Point { .. } => return,
     };
     let _ = try_constrain(sk, c);
 }
@@ -267,6 +270,16 @@ pub struct DrawField {
     /// Current measured value, shown as hint while the field is empty.
     pub live: String,
     pub pos: Option<Pos2>,
+}
+
+/// The Text tool's popup: text and height for the clicked insertion point.
+pub struct TextInput {
+    /// Start of the baseline on the sketch plane.
+    pub at: [f64; 2],
+    pub text: String,
+    /// Screen position of the insertion point, updated every frame.
+    pub pos: Option<Pos2>,
+    pub focus: bool,
 }
 
 /// Value fields for the shape being drawn: type a value to lock it, Tab to
@@ -367,6 +380,9 @@ pub struct SketchSession {
     pub fillet_radius: String,
     pub offset_distance: String,
     pub pattern_count: String,
+    pub text_input: Option<TextInput>,
+    /// Text height expression, kept between uses of the Text tool.
+    pub text_height: String,
 }
 
 impl SketchSession {
@@ -392,6 +408,8 @@ impl SketchSession {
             fillet_radius: "2 mm".into(),
             offset_distance: "2 mm".into(),
             pattern_count: "4".into(),
+            text_input: None,
+            text_height: "5 mm".into(),
         }
     }
 
@@ -404,6 +422,7 @@ impl SketchSession {
         self.dragging = None;
         self.inline = None;
         self.draw_input = None;
+        self.text_input = None;
     }
 
     pub fn hint(&self) -> &'static str {
@@ -447,6 +466,9 @@ impl SketchSession {
             Tool::Project => "Project: click body edges to bring them into the sketch (P)",
             Tool::Spline if n < 2 => "Spline: click fit points",
             Tool::Spline => "Spline: click more fit points · Enter or double-click to finish · Esc cancels",
+            Tool::Point => "Point: click to place sketch points (snaps to points and curves)",
+            Tool::Text if self.text_input.is_none() => "Text: click where the baseline starts (text runs along the sketch x axis)",
+            Tool::Text => "Text: type the text and its height · Enter places it · Esc cancels · click to move it",
         }
     }
 }
@@ -476,6 +498,7 @@ pub fn entity_polyline(sk: &Sketch, e: &Entity) -> Vec<[f64; 2]> {
             let fit: Vec<[f64; 2]> = points.iter().map(|p| sk.point_pos(*p)).collect();
             ferrocad_sketch::spline_samples(&fit, 16)
         }
+        Entity::Point { p } => vec![sk.point_pos(p)],
     }
 }
 
@@ -526,10 +549,28 @@ impl Projector<'_> {
 }
 
 fn visible_points(sk: &Sketch) -> Vec<PointId> {
-    let mut pts: Vec<PointId> = sk.entities().flat_map(|(_, e)| e.points()).collect();
-    pts.sort();
-    pts.dedup();
-    pts
+    sk.used_points()
+}
+
+/// Inner corners of fixed polylines (exploded text, projected curves): fixed
+/// points joining exactly two fixed lines, without constraints of their own.
+/// Their dots and fix badges would only clutter the view.
+fn locked_points(sk: &Sketch) -> std::collections::HashSet<PointId> {
+    let mut uses: HashMap<PointId, (usize, bool)> = HashMap::new();
+    for (_, e) in sk.entities() {
+        let fixed_line = matches!(e, Entity::Line { a, b } if sk.is_point_fixed(*a) && sk.is_point_fixed(*b));
+        for p in e.points() {
+            let u = uses.entry(p).or_insert((0, true));
+            u.0 += 1;
+            u.1 &= fixed_line;
+        }
+    }
+    for (_, c) in sk.constraints() {
+        for p in c.points() {
+            uses.remove(&p);
+        }
+    }
+    uses.into_iter().filter(|(_, (n, all_fixed))| *n == 2 && *all_fixed).map(|(p, _)| p).collect()
 }
 
 fn pick_point(sk: &Sketch, pr: &Projector, pos: Pos2) -> Option<PointId> {
@@ -603,7 +644,7 @@ fn measure(sk: &Sketch, c: &Constraint) -> Option<f64> {
 fn e_center(sk: &Sketch, e: EntityId) -> Option<PointId> {
     match *sk.entity(e) {
         Entity::Circle { center, .. } | Entity::Arc { center, .. } => Some(center),
-        Entity::Line { .. } | Entity::Spline { .. } => None,
+        Entity::Line { .. } | Entity::Spline { .. } | Entity::Point { .. } => None,
     }
 }
 
@@ -659,6 +700,8 @@ fn split_selection(sel: &[Pick], sk: &Sketch) -> (Vec<PointId>, Vec<EntityId>, V
         match *p {
             Pick::Point(p) => points.push(p),
             Pick::Entity(e) if is_line(sk, e) => lines.push(e),
+            // A standalone point picked as an entity (selection box).
+            Pick::Entity(e) if matches!(sk.entity(e), Entity::Point { .. }) => points.extend(sk.entity(e).points()),
             Pick::Entity(e) => curves.push(e),
             Pick::Constraint(_) => constraints += 1,
         }
@@ -960,7 +1003,7 @@ struct Badge {
 /// Anchor on an entity for badges: (position, direction along, normal).
 fn entity_anchor(sk: &Sketch, pr: &Projector, e: EntityId) -> Option<(Pos2, Vec2, Vec2)> {
     match *sk.entity(e) {
-        Entity::Spline { .. } => None,
+        Entity::Spline { .. } | Entity::Point { .. } => None,
         Entity::Line { a, b } => {
             let (a, b) = (pr.screen(sk.point_pos(a))?, pr.screen(sk.point_pos(b))?);
             let along = (b - a).normalized();
@@ -1035,8 +1078,9 @@ fn layout_badges(sk: &Sketch, pr: &Projector, centre: Pos2) -> Vec<Badge> {
             }
         }
     }
+    let locked = locked_points(sk);
     for p in visible_points(sk) {
-        if sk.is_point_fixed(p) {
+        if sk.is_point_fixed(p) && !locked.contains(&p) {
             at_point(p, Icon::Fix, BadgeTarget::FixedPoint(p), &mut badges);
         }
     }
@@ -1160,7 +1204,8 @@ impl FerroApp {
         if sess.tool == Tool::Select {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 let origin = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos());
-                sess.dragging = origin.and_then(|p| pick_point(&sf.sketch, &pr, p));
+                // Fixed points (text, projections, Fix) stay where they are.
+                sess.dragging = origin.and_then(|p| pick_point(&sf.sketch, &pr, p)).filter(|p| !sf.sketch.is_point_fixed(*p));
                 // On empty space the drag draws a selection rectangle.
                 sess.box_start = origin.filter(|p| sess.dragging.is_none() && pick_entity(&sf.sketch, &pr, *p).is_none());
             }
@@ -1375,6 +1420,15 @@ impl FerroApp {
                             }
                         }
                     }
+                    Tool::Text => {
+                        // Place (or move) the text's insertion point.
+                        if let Some(uv) = hover_uv {
+                            match &mut sess.text_input {
+                                Some(t) => t.at = uv,
+                                None => sess.text_input = Some(TextInput { at: uv, text: String::new(), pos: None, focus: true }),
+                            }
+                        }
+                    }
                     Tool::Project => {
                         if let Some((_, poly)) = &project_hover {
                             match ferrocad_model::project::project_edge(sf, poly) {
@@ -1435,6 +1489,23 @@ impl FerroApp {
             }
         }
         for (id, e) in sk.entities() {
+            if let Entity::Point { p } = *e {
+                // Standalone points are always shown, even with points hidden.
+                if let Some(s) = pr.screen(sk.point_pos(p)) {
+                    let selected = [Pick::Entity(id), Pick::Point(p)].iter().any(|q| sess.selection.contains(q))
+                        || highlighted_points.contains(&p);
+                    let color = if selected {
+                        COL_SELECTED
+                    } else if analysis.is_some_and(|a| sk.is_point_determined(a, p)) {
+                        COL_FIXED
+                    } else {
+                        COL_FREE
+                    };
+                    let r = if Some(p) == hover_point { 5.0 } else { 3.8 };
+                    painter.circle(s, r, color, Stroke::new(1.2, Color32::from_black_alpha(200)));
+                }
+                continue;
+            }
             let pts = pr.polyline(&entity_polyline(sk, e));
             let selected = sess.selection.contains(&Pick::Entity(id)) || highlighted.contains(&id);
             let hovered = pre_highlight && hover_point.is_none() && hover_entity == Some(id);
@@ -1460,7 +1531,11 @@ impl FerroApp {
             }
         }
         if sess.show_points {
+            let locked = locked_points(sk);
             for p in visible_points(sk) {
+                if locked.contains(&p) || sk.point_entity(p).is_some() {
+                    continue;
+                }
                 if let Some(s) = pr.screen(sk.point_pos(p)) {
                     let selected = sess.selection.contains(&Pick::Point(p)) || highlighted_points.contains(&p);
                     let color = if selected {
@@ -1641,6 +1716,23 @@ impl FerroApp {
             }
         }
 
+        // Text tool: outline preview at the insertion point.
+        if let Some(t) = &mut sess.text_input {
+            let height = params.eval(&sess.text_height).unwrap_or(0.0);
+            let preview = Stroke::new(1.2, COL_PREVIEW);
+            for c in crate::text::outlines(&t.text, height).unwrap_or_default() {
+                let mut pts: Vec<Pos2> = c.iter().filter_map(|q| pr.screen([q[0] + t.at[0], q[1] + t.at[1]])).collect();
+                if let Some(first) = pts.first().copied() {
+                    pts.push(first);
+                }
+                painter.add(egui::Shape::line(pts, preview));
+            }
+            if let Some(s) = pr.screen(t.at) {
+                painter.circle(s, 3.5, COL_SELECTED, Stroke::new(1.0, Color32::from_black_alpha(160)));
+                t.pos = Some(s);
+            }
+        }
+
         if let Some((_, poly)) = &project_hover {
             let pts: Vec<Pos2> = poly.iter().filter_map(|p| cam.project(*p, vp)).map(|s| egui::pos2(s[0] as f32, s[1] as f32)).collect();
             painter.add(egui::Shape::line(pts, Stroke::new(3.0, theme::ACCENT)));
@@ -1663,6 +1755,7 @@ impl FerroApp {
         match cmd {
             SketchCommand::Tool(tool) => {
                 sess.clicks.clear();
+                sess.text_input = None;
                 if tool == Tool::Dimension {
                     if let Some(c) = dimension_from_selection(&sess.selection, &sf.sketch) {
                         match create_dimension(sess, &mut sf.sketch, c, None) {
@@ -1715,7 +1808,9 @@ impl FerroApp {
                             sess.dim_edits.remove(&c);
                         }
                         Pick::Point(p) => {
-                            if sf.sketch.is_point_fixed(p) {
+                            if let Some(e) = sf.sketch.point_entity(p) {
+                                sf.sketch.remove_entity(e);
+                            } else if sf.sketch.is_point_fixed(p) {
                                 sf.sketch.set_point_fixed(p, false);
                             }
                         }
@@ -1724,7 +1819,9 @@ impl FerroApp {
                 }
             }
             SketchCommand::Escape => {
-                if !sess.clicks.is_empty() {
+                if sess.text_input.is_some() {
+                    sess.text_input = None;
+                } else if !sess.clicks.is_empty() {
                     sess.clicks.clear();
                 } else if sess.tool != Tool::Select {
                     sess.tool = Tool::Select;
@@ -1817,6 +1914,7 @@ impl FerroApp {
     /// dimension editor.
     pub fn sketch_overlays(&mut self, ctx: &egui::Context) {
         self.draw_input_overlay(ctx);
+        self.text_input_overlay(ctx);
         let params = self.doc.params.clone();
         let Mode::Sketch(sess) = &mut self.mode else { return };
         let Some(edit) = &mut sess.inline else { return };
@@ -1879,6 +1977,73 @@ impl FerroApp {
                 sess.dim_edits.insert(edit.id, shown);
                 sess.analysis = None;
                 self.commit_sketch_edit("Edit dimension");
+            }
+            Err(e) => self.error(e),
+        }
+    }
+
+    /// The Text tool's popup next to the insertion point: text and height.
+    fn text_input_overlay(&mut self, ctx: &egui::Context) {
+        let params = self.doc.params.clone();
+        let Mode::Sketch(sess) = &mut self.mode else { return };
+        let Some(input) = &mut sess.text_input else { return };
+        let Some(pos) = input.pos else { return };
+        let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+        let height = params.eval(&sess.text_height);
+        let mut ok = false;
+        let mut cancel = esc;
+        egui::Area::new(egui::Id::new("sketch_text"))
+            .fixed_pos(pos + egui::vec2(14.0, 14.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                    egui::Grid::new("sketch_text_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                        ui.label("Text");
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut input.text)
+                                .id(egui::Id::new("sketch_text_edit"))
+                                .hint_text("type text")
+                                .desired_width(160.0),
+                        );
+                        if input.focus {
+                            r.request_focus();
+                            input.focus = false;
+                        }
+                        ui.end_row();
+                        ui.label("Height");
+                        let invalid = height.as_ref().map_or(true, |h| *h <= 0.0);
+                        let edit = egui::TextEdit::singleline(&mut sess.text_height).desired_width(80.0);
+                        let edit = if invalid { edit.text_color(theme::ERROR) } else { edit };
+                        let r = ui.add(edit);
+                        if r.lost_focus() && !enter {
+                            sess.text_height = with_unit(&sess.text_height, "mm");
+                        }
+                        ui.end_row();
+                    });
+                    ui.horizontal(|ui| {
+                        ok |= ui.button("OK").clicked();
+                        cancel |= ui.button("Cancel").clicked();
+                    });
+                });
+            });
+        if cancel {
+            sess.text_input = None;
+            return;
+        }
+        if !(ok || enter) {
+            return;
+        }
+        let h = match height {
+            Ok(h) if h > 0.0 => h,
+            _ => return self.error("text height must be a positive value"),
+        };
+        let (at, text) = (input.at, input.text.clone());
+        let Some(sf) = self.doc.sketch_mut(sess.feature) else { return };
+        match crate::text::add_text(&mut sf.sketch, at, &text, h) {
+            Ok(_) => {
+                sess.text_input = None;
+                sess.analysis = None;
+                self.commit_sketch_edit("Text");
             }
             Err(e) => self.error(e),
         }
@@ -2357,6 +2522,17 @@ fn handle_click(sess: &mut SketchSession, sk: &mut Sketch, anchor: Anchor, error
                 }
             }
             Some(Created::Arc)
+        }
+        Tool::Point => {
+            let e = sk.add_point_entity(anchor.pos(sk));
+            let p = sk.entity(e).points()[0];
+            if let Some(q) = anchor.existing() {
+                let _ = try_constrain(sk, Constraint::Coincident(p, q));
+            }
+            if let Some(curve) = anchor.curve() {
+                stick_to_curve(sk, p, curve);
+            }
+            Some(Created::Shape)
         }
         Tool::Spline => {
             // Points collect until Enter / double-click (see `finish_spline`).
