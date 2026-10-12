@@ -21,6 +21,13 @@ pub fn fillet(shape: &Shape, edges: &[u32], radius: f64, chamfer: bool) -> SafeR
     wrap(ferro::ferro_fillet(&shape.inner, edges, radius, chamfer))
 }
 
+/// One wall band of a thin extrude: the single-loop planar `face` grown by
+/// `grow` minus it shrunk by `shrink`, extruded `forward` along the unit
+/// vector `dir` and `backward` against it.
+pub fn thin_band(face: &Shape, dir: DVec3, forward: f64, backward: f64, grow: f64, shrink: f64) -> SafeResult {
+    wrap(ferro::ferro_thin_band(&face.inner, &[dir.x, dir.y, dir.z, backward, forward, grow, shrink]))
+}
+
 /// Chamfer edges with `d1` on the first adjacent face and `d2` on the other.
 pub fn chamfer2(shape: &Shape, edges: &[u32], d1: f64, d2: f64) -> SafeResult {
     wrap(ferro::ferro_chamfer2(&shape.inner, edges, d1, d2))

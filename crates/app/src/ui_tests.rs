@@ -466,6 +466,8 @@ fn box_model(h: &mut Harness<'static, FerroApp>) {
             operation: ferrocad_model::Operation::NewBody,
             distance2: None,
             taper: "0".into(),
+            extent: ferrocad_model::ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
     app.hidden_sketches.insert(s);
@@ -547,6 +549,8 @@ fn opening_a_file_frames_the_part() {
             operation: ferrocad_model::Operation::NewBody,
             distance2: None,
             taper: "0".into(),
+            extent: ferrocad_model::ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
     std::fs::write(&path, ferrocad_model::io::save(&doc)).unwrap();
@@ -861,6 +865,8 @@ fn active_component_collects_new_bodies_and_joint_limits_clamp() {
             operation: ferrocad_model::Operation::NewBody,
             distance2: None,
             taper: "0".into(),
+            extent: ferrocad_model::ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
     h.state_mut().rebuild();
@@ -1089,4 +1095,150 @@ fn values_always_show_their_unit() {
     let Mode::Feature(s) = &h.state().mode else { panic!("left the dialog") };
     assert_eq!(s.exprs[0].text, "2 mm");
     assert!(h.query_by_label("= 2 mm").is_some());
+}
+
+#[test]
+fn extrude_all_to_object_and_thin() {
+    let mut h = harness();
+    box_model(&mut h);
+    let v0 = volume(h.state());
+
+    // A 4 × 4 square on the top face, cut through all.
+    let mut sf = ferrocad_model::SketchFeature::new(ferrocad_model::Plane::XY);
+    sf.attach = Some(PlaneRef::Face(FaceRef { point: [15.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0] }));
+    sf.sketch.add_rectangle([5.0, 5.0], [9.0, 9.0]);
+    h.state_mut().doc.add("Sketch2", FeatureKind::Sketch(sf));
+    h.state_mut().rebuild();
+    run(&mut h, Command::Extrude);
+    click_at(&mut h, [7.0, 7.0, 10.0]);
+    h.get_by_label("All").click();
+    h.run_steps(2);
+    if let Mode::Extrude(e) = &mut h.state_mut().mode {
+        e.operation = ferrocad_model::Operation::Cut;
+        e.flip = true;
+    }
+    h.run_steps(2);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    assert!((volume(h.state()) - (v0 - 160.0)).abs() < 1e-6, "{}", volume(h.state()));
+
+    // A square beside the box, extruded up to the box's top face.
+    let mut sf = ferrocad_model::SketchFeature::new(ferrocad_model::Plane::XY);
+    sf.sketch.add_rectangle([40.0, 0.0], [50.0, 10.0]);
+    h.state_mut().doc.add("Sketch3", FeatureKind::Sketch(sf));
+    h.state_mut().rebuild();
+    run(&mut h, Command::Extrude);
+    click_at(&mut h, [45.0, 5.0, 0.0]);
+    h.get_by_label("To object").click();
+    h.run_steps(2);
+    assert!(matches!(&h.state().mode, Mode::Extrude(e) if e.picking_to));
+    click_at(&mut h, [20.0, 15.0, 10.0]);
+    assert!(matches!(&h.state().mode, Mode::Extrude(e) if e.to.is_some() && !e.picking_to));
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    let tower = h.state().model.bodies.last().unwrap().name.clone();
+    let v = |h: &Harness<'static, FerroApp>, name: &str| {
+        let b = h.state().model.body(name).unwrap();
+        ferrocad_model::Kernel::properties(&h.state().kernel, &b.solid).unwrap().volume
+    };
+    assert!((v(&h, &tower) - 1000.0).abs() < 1e-6, "{}", v(&h, &tower));
+
+    // Up to a plane tilted by 10° around X: the top follows the slope.
+    let tilted = h.state_mut().doc.add(
+        "Plane1",
+        FeatureKind::Plane(ferrocad_model::PlaneFeature {
+            base: PlaneRef::Origin(OriginPlane::XY),
+            offset: "0".into(),
+            angle: "0".into(),
+            base2: None,
+        }),
+    );
+    let ext = h.state().doc.features().iter().find(|f| f.name == "Extrude3").map(|f| f.id).unwrap();
+    {
+        let doc = &mut h.state_mut().doc;
+        if let FeatureKind::Plane(p) = &mut doc.feature_mut(tilted).unwrap().kind {
+            p.base = PlaneRef::Face(FaceRef { point: [20.0, 15.0, 10.0], normal: [0.0, 0.0, 1.0] });
+            p.angle = "10".into();
+        }
+        let at = doc.index_of(ext).unwrap();
+        doc.move_feature(tilted, at).unwrap();
+        if let FeatureKind::Extrude(e) = &mut doc.feature_mut(ext).unwrap().kind {
+            e.extent = ferrocad_model::ExtrudeExtent::To(PlaneRef::Construction(tilted));
+        }
+    }
+    h.state_mut().rebuild();
+    no_errors(h.state());
+    let slope = 10f64.to_radians().tan() * 5.0 * 100.0; // mean y (5) × tan × area
+    let got = v(&h, &tower);
+    assert!(((got - 1000.0).abs() - slope).abs() < 1e-3, "{got}");
+
+    // Thin: a 1 mm wall inside the square instead of a solid tower.
+    if let FeatureKind::Extrude(e) = &mut h.state_mut().doc.feature_mut(ext).unwrap().kind {
+        e.extent = ferrocad_model::ExtrudeExtent::Distance;
+        e.distance = "10".into();
+        e.thin = Some(ferrocad_model::ThinWall { thickness: "1".into(), side: ferrocad_model::ThinSide::Inside });
+    }
+    h.state_mut().rebuild();
+    no_errors(h.state());
+    assert!((v(&h, &tower) - 360.0).abs() < 1e-6, "{}", v(&h, &tower));
+    h.state_mut().edit_feature(ext);
+    h.run_steps(2);
+    assert!(matches!(&h.state().mode, Mode::Extrude(e) if e.thin && e.thin_wall.thickness == "1"));
+    assert!(h.query_by_label("Wall thickness").is_some());
+}
+
+#[test]
+fn holes_on_sketch_points_and_pattern_features() {
+    let mut h = harness();
+    box_model(&mut h);
+    let v0 = volume(h.state());
+
+    // Two circles on the top face; holes go on their centres.
+    let mut sf = ferrocad_model::SketchFeature::new(ferrocad_model::Plane::XY);
+    sf.attach = Some(PlaneRef::Face(FaceRef { point: [15.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0] }));
+    sf.sketch.add_circle([5.0, 5.0], 1.0);
+    sf.sketch.add_circle([5.0, 15.0], 1.0);
+    h.state_mut().doc.add("Sketch2", FeatureKind::Sketch(sf));
+    h.state_mut().rebuild();
+    run(&mut h, Command::Feature(FeatureType::Hole));
+    click_at(&mut h, [5.0, 5.0, 10.0]);
+    click_at(&mut h, [5.0, 15.0, 10.0]);
+    let Mode::Feature(s) = &h.state().mode else { panic!("no hole dialog") };
+    assert!(s.sels[0].picks.iter().all(|p| matches!(p, Pick::SketchPoint(..))), "{:?}", s.sels[0].picks);
+    assert_eq!(s.sels[0].picks.len(), 2);
+    if let Mode::Feature(s) = &mut h.state_mut().mode {
+        s.exprs[0].text = "4".into();
+        s.flags[0].1 = true; // through all
+    }
+    h.run_steps(2);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    let hole = std::f64::consts::PI * 4.0 * 10.0;
+    assert!((volume(h.state()) - (v0 - 2.0 * hole)).abs() < 1e-3, "{}", volume(h.state()));
+    let hole_id = h.state().doc.features().last().unwrap().id;
+
+    // Pattern the hole feature: 3 along X, 8 mm apart.
+    run(&mut h, Command::Feature(FeatureType::RectPattern));
+    h.get_by_label("Features").click();
+    h.run_steps(2);
+    h.get_by_label("Hole1").click();
+    h.run_steps(2);
+    if let Mode::Feature(s) = &mut h.state_mut().mode {
+        assert!(s.pattern_features && s.features == vec![hole_id]);
+        s.exprs[1].text = "8 mm".into();
+    }
+    h.run_steps(2);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    assert_eq!(h.state().bodies.len(), 1, "feature patterns don't add bodies");
+    assert!((volume(h.state()) - (v0 - 6.0 * hole)).abs() < 1e-3, "{}", volume(h.state()));
+
+    // Editing reopens it as a feature pattern; save/load keeps everything.
+    let pattern = h.state().doc.features().last().unwrap().id;
+    h.state_mut().edit_feature(pattern);
+    h.run_steps(2);
+    assert!(matches!(&h.state().mode, Mode::Feature(s) if s.pattern_features && s.features == vec![hole_id]));
+    press(&mut h, Key::Escape);
+    let text = ferrocad_model::io::save(&h.state().doc);
+    assert_eq!(ferrocad_model::io::save(&ferrocad_model::io::load(&text).unwrap()), text);
 }

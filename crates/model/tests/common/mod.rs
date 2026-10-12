@@ -55,6 +55,11 @@ impl Kernel for Mock {
         Ok(Rc::new(MockSolid { desc, edges: s.edges.clone() }))
     }
 
+    fn extrude_thin(&self, p: &PlacedProfile, f: f64, b: f64, t: f64, side: ThinSide) -> Result<Self::Solid, KernelError> {
+        let desc = format!("thin(segs={}, f={f}, b={b}, t={t}, {side:?})", p.outer.segments.len());
+        Ok(Rc::new(MockSolid { desc, edges: vec![] }))
+    }
+
     fn chamfer_two(&self, s: &Self::Solid, e: &[EdgeRef], d1: f64, d2: f64) -> Result<Self::Solid, KernelError> {
         let desc = format!("chamfer2({}, n={}, d1={d1}, d2={d2})", s.desc, e.len());
         Ok(Rc::new(MockSolid { desc, edges: s.edges.clone() }))
@@ -158,6 +163,8 @@ pub fn plate_document() -> (Document, FeatureId, FeatureId) {
             operation: Operation::NewBody,
             distance2: None,
             taper: "0".into(),
+            extent: ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
     (doc, sketch, extrude)

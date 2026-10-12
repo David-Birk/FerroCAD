@@ -2,7 +2,7 @@
 
 use crate::geom::Plane;
 use crate::kernel::{EdgeRef, FaceRef};
-use ferrocad_sketch::{ConstraintId, EntityId, Sketch};
+use ferrocad_sketch::{ConstraintId, EntityId, PointId, Sketch};
 
 /// Stable id: survives reordering and deleting other features.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -148,6 +148,45 @@ pub struct ExtrudeFeature {
     pub distance2: Option<String>,
     /// Taper angle in degrees (positive narrows), "0" for straight walls.
     pub taper: String,
+    /// How far to go: the distance(s) above, through everything, or up to a plane/face.
+    pub extent: ExtrudeExtent,
+    /// Extrude only a wall along the profile boundary.
+    pub thin: Option<ThinWall>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ExtrudeExtent {
+    Distance,
+    /// Through everything (cut/intersect only); the sign of `distance`
+    /// picks the direction, two sides/symmetric go both ways.
+    All,
+    /// Up to a plane or flat face (tilted targets trim the end).
+    To(PlaneRef),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThinSide {
+    Inside,
+    Outside,
+    Center,
+}
+
+impl ThinSide {
+    pub const ALL: [ThinSide; 3] = [ThinSide::Inside, ThinSide::Outside, ThinSide::Center];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThinSide::Inside => "Inside",
+            ThinSide::Outside => "Outside",
+            ThinSide::Center => "Center",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThinWall {
+    pub thickness: String,
+    pub side: ThinSide,
 }
 
 /// Axis of a revolve, in terms of the profile's sketch.
@@ -232,15 +271,24 @@ pub struct ShellFeature {
     pub thickness: String,
 }
 
-/// A round hole drilled into a face at `face.point`.
+/// Round holes drilled at a face point or at sketch points.
 #[derive(Clone, Debug)]
 pub struct HoleFeature {
-    pub face: FaceRef,
+    pub placement: HolePlacement,
     pub diameter: String,
     pub depth: String,
     /// Through all instead of `depth`.
     pub through: bool,
     pub head: HoleHead,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum HolePlacement {
+    /// One hole into the face at `point`, along the inward normal.
+    Face(FaceRef),
+    /// One hole per sketch point, drilled against the sketch normal (along
+    /// it with `flip`).
+    Points { sketch: FeatureId, points: Vec<PointId>, flip: bool },
 }
 
 /// Counterbore or countersink at the top of a hole.
@@ -282,6 +330,8 @@ pub enum PatternKind {
 #[derive(Clone, Debug)]
 pub struct PatternFeature {
     pub bodies: Vec<String>,
+    /// Pattern these features (their tool solids) instead of bodies.
+    pub features: Vec<FeatureId>,
     pub kind: PatternKind,
     /// Join the copies to their original instead of making new bodies.
     pub join: bool,
@@ -511,6 +561,9 @@ impl FeatureKind {
                     v.push(("Distance 2", d2));
                 }
                 v.push(("Taper (°)", &mut e.taper));
+                if let Some(t) = &mut e.thin {
+                    v.push(("Thickness", &mut t.thickness));
+                }
                 v
             }
             FeatureKind::Revolve(r) => vec![("Angle (°)", &mut r.angle)],
@@ -572,21 +625,31 @@ impl FeatureKind {
         };
         match self {
             FeatureKind::Sketch(s) => s.attach.as_ref().map(plane).unwrap_or_default(),
-            FeatureKind::Extrude(e) => vec![e.sketch],
+            FeatureKind::Extrude(e) => match &e.extent {
+                ExtrudeExtent::To(p) => [vec![e.sketch], plane(p)].concat(),
+                _ => vec![e.sketch],
+            },
             FeatureKind::Revolve(r) => match r.axis {
                 RevolveAxis::Axis(AxisRef::Construction(a)) => vec![r.sketch, a],
                 _ => vec![r.sketch],
+            },
+            FeatureKind::Hole(h) => match &h.placement {
+                HolePlacement::Points { sketch, .. } => vec![*sketch],
+                HolePlacement::Face(_) => vec![],
             },
             FeatureKind::Plane(p) => [plane(&p.base), p.base2.as_ref().map(plane).unwrap_or_default()].concat(),
             FeatureKind::Draft(d) => plane(&d.pull),
             FeatureKind::Mirror(m) => plane(&m.plane),
             FeatureKind::Split(s) => plane(&s.plane),
-            FeatureKind::Pattern(p) => match &p.kind {
-                PatternKind::Rectangular { direction, direction2, .. } => {
-                    [axis(direction), axis(direction2)].concat()
-                }
-                PatternKind::Circular { axis: a, .. } => axis(a),
-            },
+            FeatureKind::Pattern(p) => {
+                let axes = match &p.kind {
+                    PatternKind::Rectangular { direction, direction2, .. } => {
+                        [axis(direction), axis(direction2)].concat()
+                    }
+                    PatternKind::Circular { axis: a, .. } => axis(a),
+                };
+                [axes, p.features.clone()].concat()
+            }
             FeatureKind::Move(m) => m.axis.as_ref().map(axis).unwrap_or_default(),
             FeatureKind::Loft(l) => l.profiles.iter().map(|p| p.sketch).collect(),
             FeatureKind::Sweep(s) => vec![s.profile.sketch, s.path_sketch],

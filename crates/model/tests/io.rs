@@ -22,6 +22,8 @@ fn full_document() -> Document {
             operation: Operation::Cut,
             distance2: None,
             taper: "0".into(),
+            extent: ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
     doc.add(

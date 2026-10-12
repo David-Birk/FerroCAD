@@ -6,6 +6,7 @@
 #pragma once
 #include "rust/cxx.h"
 
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -24,6 +25,7 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
+#include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakePipe.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
@@ -37,6 +39,7 @@
 #include <LocOpe_DPrism.hxx>
 #include <STEPControl_Reader.hxx>
 #include <ShapeFix_Face.hxx>
+#include <ShapeFix_Shape.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
@@ -190,7 +193,103 @@ struct Reader {
   }
 };
 
+/// Outward normal of a planar face.
+inline gp_Dir plane_normal(const TopoDS_Face &x) {
+  gp_Dir n = BRepAdaptor_Surface(x).Plane().Axis().Direction();
+  return x.Orientation() == TopAbs_REVERSED ? n.Reversed() : n;
+}
+
+/// `x` turned to face the same way as `like`, so prisms don't turn inside
+/// out and offsets grow outwards.
+inline TopoDS_Face aligned(TopoDS_Face x, const TopoDS_Face &like) {
+  if (plane_normal(x).Dot(plane_normal(like)) < 0.0) {
+    x.Reverse();
+  }
+  return x;
+}
+
+/// The region of planar `face` grown (d > 0) or shrunk (d < 0) by |d|, with
+/// round corners outside. Null if it shrinks away.
+inline TopoDS_Shape offset_region(const TopoDS_Face &face, double d) {
+  BRepOffsetAPI_MakeOffset mk(face, GeomAbs_Arc);
+  mk.Perform(d);
+  if (!mk.IsDone()) {
+    return TopoDS_Shape();
+  }
+  // The largest wire bounds the region, the others are its holes.
+  std::vector<std::pair<double, TopoDS_Wire>> wires;
+  for (TopExp_Explorer ex(mk.Shape(), TopAbs_WIRE); ex.More(); ex.Next()) {
+    TopoDS_Wire w = TopoDS::Wire(ex.Current());
+    BRepBuilderAPI_MakeFace mf(w, true);
+    if (!mf.IsDone()) {
+      continue;
+    }
+    GProp_GProps g;
+    BRepGProp::SurfaceProperties(mf.Face(), g);
+    wires.push_back(std::make_pair(std::abs(g.Mass()), w));
+  }
+  if (wires.empty() || wires[0].first < 1e-12) {
+    return TopoDS_Shape();
+  }
+  std::sort(wires.begin(), wires.end(),
+            [](const std::pair<double, TopoDS_Wire> &a, const std::pair<double, TopoDS_Wire> &b) { return a.first > b.first; });
+  BRepBuilderAPI_MakeFace mf(wires[0].second, true);
+  for (size_t i = 1; i < wires.size(); ++i) {
+    mf.Add(wires[i].second);
+  }
+  if (!mf.IsDone()) {
+    return TopoDS_Shape();
+  }
+  // Holes may come out with the wrong orientation; ShapeFix repairs that,
+  // but it can spoil a valid face, so only use it when needed.
+  TopoDS_Face region = mf.Face();
+  if (!BRepCheck_Analyzer(region).IsValid()) {
+    ShapeFix_Face fix(region);
+    fix.FixOrientation();
+    fix.Perform();
+    region = fix.Face();
+  }
+  return aligned(region, face);
+}
+
 } // namespace ferro
+
+/// One band of a thin extrude: the planar single-loop `face` grown by
+/// p[5] minus it shrunk by p[6], extruded from p[3] against the unit
+/// direction p[0..3] to p[4] along it.
+inline std::unique_ptr<TopoDS_Shape> ferro_thin_band(const TopoDS_Shape &face, rust::Slice<const double> p) {
+  return ferro::guard("thin extrude", [&]() -> TopoDS_Shape {
+    if (p.size() < 7) {
+      ferro::fail("thin extrude needs 7 values");
+    }
+    TopoDS_Face f = TopoDS::Face(face);
+    gp_Vec dir(p[0], p[1], p[2]);
+    double back = p[3], fwd = p[4], grow = p[5], shrink = p[6];
+    auto prism = [&](const TopoDS_Shape &region) -> TopoDS_Shape {
+      gp_Trsf move;
+      move.SetTranslation(-dir * back);
+      BRepBuilderAPI_Transform moved(region, move, true);
+      BRepPrimAPI_MakePrism mk(moved.Shape(), dir * (fwd + back));
+      if (!mk.IsDone()) {
+        ferro::fail("thin extrude failed");
+      }
+      return mk.Shape();
+    };
+    TopoDS_Shape big = grow > 0.0 ? ferro::offset_region(f, grow) : TopoDS_Shape(f);
+    if (big.IsNull()) {
+      ferro::fail("thin extrude failed – could not offset the profile");
+    }
+    TopoDS_Shape small = shrink > 0.0 ? ferro::offset_region(f, -shrink) : TopoDS_Shape(f);
+    if (small.IsNull()) {
+      return prism(big); // the wall fills the loop
+    }
+    BRepAlgoAPI_Cut cut(prism(big), prism(small));
+    if (!cut.IsDone() || cut.HasErrors()) {
+      ferro::fail("thin extrude failed");
+    }
+    return cut.Shape();
+  });
+}
 
 inline std::unique_ptr<TopoDS_Shape> ferro_fillet(const TopoDS_Shape &shape, rust::Slice<const uint32_t> edges,
                                                   double radius, bool chamfer) {

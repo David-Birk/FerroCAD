@@ -50,9 +50,12 @@ navigation bar · timeline · status bar with hints for the active tool.
 
 ### Solids
 
-- **Create:** extrude (E; one side / two sides / symmetric, flip, taper angle; joins by default on
-  faces), revolve (axis: sketch axis, sketch line, world or construction axis), loft, sweep, hole (H;
-  simple / counterbore / countersink), rectangular and circular pattern, mirror.
+- **Create:** extrude (E; distance, *to object* (up to a plane or flat face, tilted ones too) or
+  *all*; one side / two sides / symmetric, flip, taper angle, thin wall inside/outside/centred; joins
+  by default on faces), revolve (axis: sketch axis, sketch line, world or construction axis), loft,
+  sweep, hole (H; on a face or on sketch points – circle centres, line ends, points – simple /
+  counterbore / countersink), rectangular and circular pattern of bodies or of features (repeat holes,
+  cuts, bosses), mirror.
 - **Modify:** press pull (Q) a face, fillet (F), chamfer (equal distance or two distances), draft
   (tilt faces around a neutral plane), shell, combine, split body, move/copy (M), remove (Del),
   parameters (user and model parameters: every dimension and feature value in one table).

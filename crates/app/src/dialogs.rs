@@ -3,13 +3,14 @@
 //! with OK (Enter) / Cancel (Esc); extrude and revolve show a live preview.
 
 use crate::app::{FerroApp, Mode};
+use crate::features_ui::{Pick, SelKind};
 use crate::icons::{self, Icon};
 use crate::theme;
 use egui::{Color32, RichText, Stroke, Ui};
 use ferrocad_model::kernel::polyline_midpoint;
 use ferrocad_model::{
-    Document, EdgeRef, ExtrudeFeature, FeatureId, FeatureKind, FilletFeature, Operation, ParamTable,
-    RevolveAxis, RevolveFeature, SketchFeature,
+    Document, EdgeRef, ExtrudeExtent, ExtrudeFeature, FeatureId, FeatureKind, FilletFeature, Operation,
+    ParamTable, PlaneRef, RevolveAxis, RevolveFeature, SketchFeature, ThinSide, ThinWall,
 };
 use ferrocad_sketch::find_profiles;
 use ferrocad_sketch::profile::profile_at;
@@ -34,7 +35,22 @@ pub struct ExtrudeSession {
     pub distance2: String,
     /// Taper angle in degrees; positive narrows the profile.
     pub taper: String,
+    pub extent: Extent,
+    /// Target of "To object".
+    pub to: Option<PlaneRef>,
+    /// Clicks in the viewport pick the "To" target instead of a profile.
+    pub picking_to: bool,
+    pub thin: bool,
+    pub thin_wall: ThinWall,
     pub operation: Operation,
+}
+
+/// The extent choice in the Extrude dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Extent {
+    Distance,
+    To,
+    All,
 }
 
 impl ExtrudeSession {
@@ -59,6 +75,11 @@ impl ExtrudeSession {
             two_sides: false,
             distance2: "10 mm".into(),
             taper: "0°".into(),
+            extent: Extent::Distance,
+            to: None,
+            picking_to: false,
+            thin: false,
+            thin_wall: ThinWall { thickness: "2 mm".into(), side: ThinSide::Inside },
             operation: if on_face { Operation::Join } else { Operation::NewBody },
         }
     }
@@ -83,6 +104,18 @@ impl ExtrudeSession {
                 None => "10 mm".into(),
             },
             taper: e.taper.clone(),
+            extent: match e.extent {
+                ExtrudeExtent::Distance => Extent::Distance,
+                ExtrudeExtent::To(_) => Extent::To,
+                ExtrudeExtent::All => Extent::All,
+            },
+            to: match e.extent {
+                ExtrudeExtent::To(p) => Some(p),
+                _ => None,
+            },
+            picking_to: false,
+            thin: e.thin.is_some(),
+            thin_wall: e.thin.clone().unwrap_or(ThinWall { thickness: "2 mm".into(), side: ThinSide::Inside }),
             operation: e.operation,
         }
     }
@@ -368,7 +401,32 @@ impl FerroApp {
 
     pub fn extrude_viewport(&mut self, response: &egui::Response, painter: &egui::Painter, vp: &Viewport) {
         let cam = self.camera;
+        let (picking_to, to) = match &self.mode {
+            Mode::Extrude(s) => (s.picking_to, s.to),
+            _ => return,
+        };
+        // "To object" target: hovered or picked plane/face, drawn like a construction plane.
+        let hover = if picking_to {
+            response.hover_pos().and_then(|p| self.hover_pick(SelKind::Plane, p, vp))
+        } else {
+            None
+        };
+        for (target, color) in [(to, COL_PICKED), (hover.as_ref().and_then(Pick::plane_ref), COL_PROFILE)] {
+            if let Some((plane, centred)) = target.and_then(|t| self.plane_of(&t)) {
+                let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 50);
+                self.draw_plane(painter, vp, &plane, centred, fill, Stroke::new(1.5, color));
+            }
+        }
         let Mode::Extrude(sess) = &mut self.mode else { return };
+        if picking_to {
+            if response.clicked() {
+                if let Some(p) = hover.as_ref().and_then(Pick::plane_ref) {
+                    sess.to = Some(p);
+                    sess.picking_to = false;
+                }
+            }
+            return;
+        }
         let Some(sf) = sess.sketch.and_then(|id| self.doc.sketch(id)) else { return };
         pick_profile(sf, &mut sess.profile_point, response, painter, vp, &cam);
     }
@@ -379,10 +437,13 @@ impl FerroApp {
         let preview_error = self.preview.as_ref().and_then(|p| p.error.clone());
         let viewport = self.viewport_rect;
         let Mode::Extrude(sess) = &mut self.mode else { return };
+        let by_distance = sess.extent == Extent::Distance;
         let ready = sess.sketch.is_some()
             && sess.profile_point.is_some()
-            && params.eval(&sess.distance).is_ok()
-            && (!sess.two_sides || params.eval(&sess.distance2).is_ok())
+            && (!by_distance || params.eval(&sess.distance).is_ok())
+            && (!by_distance || !sess.two_sides || params.eval(&sess.distance2).is_ok())
+            && (sess.extent != Extent::To || sess.to.is_some())
+            && (!sess.thin || params.eval(&sess.thin_wall.thickness).is_ok())
             && params.eval(&sess.taper).is_ok();
 
         let action = command_dialog(ctx, viewport, "Extrude", Icon::Extrude, ready, |ui| {
@@ -394,29 +455,73 @@ impl FerroApp {
             form_label(ui, "Profile");
             selection_status(ui, sess.profile_point.is_some(), "1 selected", "Select a profile");
             ui.end_row();
-            form_label(ui, "Direction");
+            form_label(ui, "Extent");
             ui.horizontal(|ui| {
-                let mut direction = (sess.symmetric, sess.two_sides);
-                ui.selectable_value(&mut direction, (false, false), "One side");
-                ui.selectable_value(&mut direction, (false, true), "Two sides");
-                ui.selectable_value(&mut direction, (true, false), "Symmetric");
-                (sess.symmetric, sess.two_sides) = direction;
-                if !sess.symmetric {
-                    ui.checkbox(&mut sess.flip, "Flip");
+                ui.selectable_value(&mut sess.extent, Extent::Distance, "Distance");
+                if ui.selectable_value(&mut sess.extent, Extent::To, "To object").clicked() {
+                    sess.picking_to = sess.to.is_none();
                 }
+                ui.selectable_value(&mut sess.extent, Extent::All, "All");
             });
             ui.end_row();
-            form_label(ui, if sess.two_sides { "Distance 1" } else { "Distance" });
-            expression_field(ui, &params, &mut sess.distance, "mm");
-            ui.end_row();
-            if sess.two_sides {
-                form_label(ui, "Distance 2");
-                expression_field(ui, &params, &mut sess.distance2, "mm");
+            if sess.extent != Extent::To {
+                sess.picking_to = false;
+                form_label(ui, "Direction");
+                ui.horizontal(|ui| {
+                    let mut direction = (sess.symmetric, sess.two_sides);
+                    ui.selectable_value(&mut direction, (false, false), "One side");
+                    ui.selectable_value(&mut direction, (false, true), "Two sides");
+                    ui.selectable_value(&mut direction, (true, false), "Symmetric");
+                    (sess.symmetric, sess.two_sides) = direction;
+                    if !sess.symmetric {
+                        ui.checkbox(&mut sess.flip, "Flip");
+                    }
+                });
                 ui.end_row();
+            }
+            match sess.extent {
+                Extent::Distance => {
+                    form_label(ui, if sess.two_sides { "Distance 1" } else { "Distance" });
+                    expression_field(ui, &params, &mut sess.distance, "mm");
+                    ui.end_row();
+                    if sess.two_sides {
+                        form_label(ui, "Distance 2");
+                        expression_field(ui, &params, &mut sess.distance2, "mm");
+                        ui.end_row();
+                    }
+                }
+                Extent::To => {
+                    form_label(ui, "To");
+                    let text = match (sess.to, sess.picking_to) {
+                        (_, true) => "Select a plane or face",
+                        (Some(_), false) => "✔ 1 selected",
+                        (None, false) => "Click to select",
+                    };
+                    if ui.selectable_label(sess.picking_to, text).clicked() {
+                        sess.picking_to = true;
+                    }
+                    ui.end_row();
+                }
+                Extent::All => {}
             }
             form_label(ui, "Taper angle");
             expression_field(ui, &params, &mut sess.taper, "°");
             ui.end_row();
+            form_label(ui, "Thin");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut sess.thin, "");
+                if sess.thin {
+                    for side in ThinSide::ALL {
+                        ui.selectable_value(&mut sess.thin_wall.side, side, side.label());
+                    }
+                }
+            });
+            ui.end_row();
+            if sess.thin {
+                form_label(ui, "Wall thickness");
+                expression_field(ui, &params, &mut sess.thin_wall.thickness, "mm");
+                ui.end_row();
+            }
             form_label(ui, "Operation");
             operation_combo(ui, "extrude_op", &mut sess.operation);
             ui.end_row();
@@ -435,6 +540,13 @@ impl FerroApp {
                     false => sess.distance2.clone(),
                 }),
                 taper: sess.taper.clone(),
+                extent: match (sess.extent, sess.to) {
+                    (Extent::Distance, _) => ExtrudeExtent::Distance,
+                    (Extent::All, _) => ExtrudeExtent::All,
+                    (Extent::To, Some(p)) => ExtrudeExtent::To(p),
+                    (Extent::To, None) => ExtrudeExtent::Distance,
+                },
+                thin: sess.thin.then(|| sess.thin_wall.clone()),
             }),
             _ => None,
         };

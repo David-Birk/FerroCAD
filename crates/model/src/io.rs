@@ -189,6 +189,19 @@ fn feature_to_json(f: &Feature) -> Json {
             if !matches!(e.taper.trim(), "0" | "0°" | "0 deg") {
                 add("taper", e.taper.as_str().into());
             }
+            match &e.extent {
+                ExtrudeExtent::Distance => {}
+                ExtrudeExtent::All => add("extent", "all".into()),
+                ExtrudeExtent::To(p) => add("extent", obj([("to", plane_ref_to_json(p))])),
+            }
+            if let Some(t) = &e.thin {
+                let side = match t.side {
+                    ThinSide::Inside => "inside",
+                    ThinSide::Outside => "outside",
+                    ThinSide::Center => "center",
+                };
+                add("thin", obj([("thickness", t.thickness.as_str().into()), ("side", side.into())]));
+            }
         }
         FeatureKind::Revolve(r) => {
             add("type", "revolve".into());
@@ -250,7 +263,14 @@ fn feature_to_json(f: &Feature) -> Json {
         }
         FeatureKind::Hole(h) => {
             add("type", "hole".into());
-            add("face", face_to_json(&h.face));
+            match &h.placement {
+                HolePlacement::Face(face) => add("face", face_to_json(face)),
+                HolePlacement::Points { sketch, points, flip } => {
+                    add("sketch", sketch.0.into());
+                    add("points", Json::Arr(points.iter().map(|p| p.0.into()).collect()));
+                    add("flip", (*flip).into());
+                }
+            }
             add("diameter", h.diameter.as_str().into());
             add("depth", h.depth.as_str().into());
             add("through", h.through.into());
@@ -275,6 +295,9 @@ fn feature_to_json(f: &Feature) -> Json {
         FeatureKind::Pattern(p) => {
             add("type", "pattern".into());
             add("bodies", names_to_json(&p.bodies));
+            if !p.features.is_empty() {
+                add("features", Json::Arr(p.features.iter().map(|f| f.0.into()).collect()));
+            }
             add("join", p.join.into());
             match &p.kind {
                 PatternKind::Rectangular { direction, count, spacing, direction2, count2, spacing2 } => {
@@ -574,6 +597,23 @@ fn feature_from_json(f: &Json) -> R<Feature> {
             operation: op_from(f.get("operation")?)?,
             distance2: f.get_opt("distance2").map(|d| d.as_str().map(str::to_string)).transpose()?,
             taper: f.get_opt("taper").map(|t| t.as_str().map(str::to_string)).transpose()?.unwrap_or_else(|| "0".into()),
+            extent: match f.get_opt("extent") {
+                None => ExtrudeExtent::Distance,
+                Some(Json::Str(s)) if s == "all" => ExtrudeExtent::All,
+                Some(x) => ExtrudeExtent::To(plane_ref_from(x.get("to")?)?),
+            },
+            thin: match f.get_opt("thin") {
+                None => None,
+                Some(t) => Some(ThinWall {
+                    thickness: str_of(t, "thickness")?,
+                    side: match t.get("side")?.as_str()? {
+                        "inside" => ThinSide::Inside,
+                        "outside" => ThinSide::Outside,
+                        "center" => ThinSide::Center,
+                        other => return Err(LoadError(format!("unknown thin side '{other}'"))),
+                    },
+                }),
+            },
         }),
         "revolve" => {
             let axis = match f.get("axis")? {
@@ -631,7 +671,14 @@ fn feature_from_json(f: &Json) -> R<Feature> {
             thickness: str_of(f, "thickness")?,
         }),
         "hole" => FeatureKind::Hole(HoleFeature {
-            face: face_from(f.get("face")?)?,
+            placement: match f.get_opt("face") {
+                Some(face) => HolePlacement::Face(face_from(face)?),
+                None => HolePlacement::Points {
+                    sketch: FeatureId(f.get("sketch")?.as_usize()? as u64),
+                    points: f.get("points")?.as_arr()?.iter().map(|p| p.as_usize().map(PointId)).collect::<Result<_, _>>()?,
+                    flip: f.get("flip")?.as_bool()?,
+                },
+            },
             diameter: str_of(f, "diameter")?,
             depth: str_of(f, "depth")?,
             through: f.get("through")?.as_bool()?,
@@ -665,6 +712,10 @@ fn feature_from_json(f: &Json) -> R<Feature> {
             };
             FeatureKind::Pattern(PatternFeature {
                 bodies: names_from(f.get("bodies")?)?,
+                features: match f.get_opt("features") {
+                    Some(list) => list.as_arr()?.iter().map(|x| x.as_usize().map(|i| FeatureId(i as u64))).collect::<Result<_, _>>()?,
+                    None => vec![],
+                },
                 kind,
                 join: f.get("join")?.as_bool()?,
             })

@@ -51,6 +51,8 @@ fn errors_do_not_stop_later_features() {
             operation: Operation::NewBody,
             distance2: None,
             taper: "0".into(),
+            extent: ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
     let model = doc.rebuild(&Mock);
@@ -76,6 +78,8 @@ fn cut_and_join() {
             operation: Operation::Cut,
             distance2: None,
             taper: "0".into(),
+            extent: ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
     doc.add(
@@ -88,6 +92,8 @@ fn cut_and_join() {
             operation: Operation::Join,
             distance2: None,
             taper: "0".into(),
+            extent: ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
     let model = doc.rebuild(&Mock);
@@ -153,6 +159,8 @@ fn profile_point_selects_hole_region() {
             operation: Operation::NewBody,
             distance2: None,
             taper: "0".into(),
+            extent: ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
     let model = doc.rebuild(&Mock);

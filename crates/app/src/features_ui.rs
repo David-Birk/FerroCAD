@@ -13,7 +13,7 @@ use ferrocad_model::geom::{add, dot, normalize, scale, sub, Vec3};
 use ferrocad_model::*;
 use ferrocad_sketch::find_profiles;
 use ferrocad_sketch::profile::profile_at;
-use ferrocad_sketch::EntityId;
+use ferrocad_sketch::{EntityId, PointId};
 use ferrocad_view::Viewport;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +104,19 @@ pub enum Pick {
     Plane(PlaneRef),
     Axis(AxisRef),
     Curve(FeatureId, EntityId),
+    /// A point of a sketch (hole positions).
+    SketchPoint(FeatureId, PointId),
+}
+
+impl Pick {
+    /// The plane a plane or flat-face pick stands for.
+    pub fn plane_ref(&self) -> Option<PlaneRef> {
+        match self {
+            Pick::Plane(p) => Some(*p),
+            Pick::Face(f) => Some(PlaneRef::Face(*f)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +134,8 @@ pub enum SelKind {
     Curve,
     /// A joint origin: a circular/straight edge or a point on a face.
     JointOrigin,
+    /// Where holes go: a flat face, or sketch points.
+    HolePosition,
 }
 
 impl SelKind {
@@ -135,6 +150,7 @@ impl SelKind {
                 | (SelKind::Axis, Pick::Axis(_))
                 | (SelKind::Curve, Pick::Curve(..))
                 | (SelKind::JointOrigin, Pick::Edge(_) | Pick::Face(_))
+                | (SelKind::HolePosition, Pick::Face(_) | Pick::SketchPoint(..))
         )
     }
 
@@ -150,6 +166,7 @@ impl SelKind {
             SelKind::Axis => "an axis",
             SelKind::Curve => "sketch curves",
             SelKind::JointOrigin => "a round edge or a face point",
+            SelKind::HolePosition => "a flat face or sketch points",
         }
     }
 }
@@ -177,6 +194,9 @@ pub struct FeatureSession {
     pub flags: Vec<(&'static str, bool)>,
     /// Index into `Operation::ALL` (loft, sweep) or `CombineOp::ALL` (combine).
     pub op: usize,
+    /// Patterns: repeat features instead of bodies.
+    pub pattern_features: bool,
+    pub features: Vec<FeatureId>,
 }
 
 fn sel(label: &'static str, kind: SelKind, multi: bool) -> SelInput {
@@ -200,7 +220,7 @@ impl FeatureSession {
                 vec![("Flip", false)],
             ),
             T::Hole => (
-                vec![sel("Position", K::FlatFace, false)],
+                vec![sel("Position", K::HolePosition, true)],
                 vec![
                     expr("Diameter", "5 mm", "mm"),
                     expr("Depth", "10 mm", "mm"),
@@ -208,7 +228,7 @@ impl FeatureSession {
                     expr("Head depth", "3 mm", "mm"),
                     expr("Head angle", "90°", "°"),
                 ],
-                vec![("Through all", false)],
+                vec![("Through all", false), ("Flip", false)],
             ),
             T::Mirror => (
                 vec![sel("Bodies", K::Body, true), sel("Mirror plane", K::Plane, false)],
@@ -281,7 +301,17 @@ impl FeatureSession {
                 vec![("Flip", false), ("Limits", false)],
             ),
         };
-        let mut s = FeatureSession { ty, editing: None, sels, active: 0, exprs, flags, op: 0 };
+        let mut s = FeatureSession {
+            ty,
+            editing: None,
+            sels,
+            active: 0,
+            exprs,
+            flags,
+            op: 0,
+            pattern_features: false,
+            features: Vec::new(),
+        };
         s.active = s.first_empty();
         s
     }
@@ -304,6 +334,31 @@ impl FeatureSession {
         s
     }
 
+    /// Patterns: switch between patterning bodies and features (the body
+    /// input is unused for features).
+    pub fn set_pattern_features(&mut self, on: bool) {
+        self.pattern_features = on;
+        self.sels[0].optional = on;
+        if on {
+            self.sels[0].picks.clear();
+            self.active = 1;
+        } else {
+            self.active = self.first_empty();
+        }
+    }
+
+    /// Bodies or features a pattern repeats.
+    fn pattern_targets(&self) -> Result<(Vec<String>, Vec<FeatureId>), String> {
+        if self.pattern_features {
+            if self.features.is_empty() {
+                return Err("select the features to pattern".into());
+            }
+            Ok((vec![], self.features.clone()))
+        } else {
+            Ok((self.bodies(0)?, vec![]))
+        }
+    }
+
     fn first_empty(&self) -> usize {
         self.sels.iter().position(|i| i.picks.is_empty() && !i.optional).unwrap_or(0)
     }
@@ -314,6 +369,9 @@ impl FeatureSession {
 
     /// Add (or toggle off) a pick for the active input.
     pub fn pick(&mut self, p: Pick) {
+        if self.pattern_features && self.active == 0 {
+            return;
+        }
         let Some(input) = self.sels.get_mut(self.active) else { return };
         if input.multi {
             if let Some(i) = input.picks.iter().position(|q| *q == p) {
@@ -398,7 +456,22 @@ impl FeatureSession {
                 FeatureKind::Shell(ShellFeature { faces, thickness: self.e(0) })
             }
             T::Hole => FeatureKind::Hole(HoleFeature {
-                face: self.face(0)?,
+                placement: {
+                    let picks = &self.sels[0].picks;
+                    let points: Vec<(FeatureId, PointId)> =
+                        picks.iter().filter_map(|p| if let Pick::SketchPoint(s, q) = p { Some((*s, *q)) } else { None }).collect();
+                    match (points.first(), picks.as_slice()) {
+                        (Some(&(sketch, _)), _) => {
+                            if points.len() != picks.len() || points.iter().any(|(s, _)| *s != sketch) {
+                                return Err("pick sketch points of one sketch, or one face".into());
+                            }
+                            HolePlacement::Points { sketch, points: points.iter().map(|(_, q)| *q).collect(), flip: self.flags[1].1 }
+                        }
+                        (None, [Pick::Face(f)]) => HolePlacement::Face(*f),
+                        (None, []) => return Err("select a face or sketch points".into()),
+                        (None, _) => return Err("pick one face, or sketch points".into()),
+                    }
+                },
                 diameter: self.e(0),
                 depth: self.e(1),
                 through: self.flags[0].1,
@@ -413,23 +486,31 @@ impl FeatureSession {
                 plane: self.plane(1)?,
                 join: self.flags[0].1,
             }),
-            T::RectPattern => FeatureKind::Pattern(PatternFeature {
-                bodies: self.bodies(0)?,
-                kind: PatternKind::Rectangular {
-                    direction: self.axis(1)?,
-                    count: self.e(0),
-                    spacing: self.e(1),
-                    direction2: self.axis(2).unwrap_or(AxisRef::World(1)),
-                    count2: if self.sels[2].picks.is_empty() { "1".into() } else { self.e(2) },
-                    spacing2: self.e(3),
-                },
-                join: self.flags[0].1,
-            }),
-            T::CircPattern => FeatureKind::Pattern(PatternFeature {
-                bodies: self.bodies(0)?,
-                kind: PatternKind::Circular { axis: self.axis(1)?, count: self.e(0), angle: self.e(1) },
-                join: self.flags[0].1,
-            }),
+            T::RectPattern => {
+                let (bodies, features) = self.pattern_targets()?;
+                FeatureKind::Pattern(PatternFeature {
+                    bodies,
+                    features,
+                    kind: PatternKind::Rectangular {
+                        direction: self.axis(1)?,
+                        count: self.e(0),
+                        spacing: self.e(1),
+                        direction2: self.axis(2).unwrap_or(AxisRef::World(1)),
+                        count2: if self.sels[2].picks.is_empty() { "1".into() } else { self.e(2) },
+                        spacing2: self.e(3),
+                    },
+                    join: self.flags[0].1,
+                })
+            }
+            T::CircPattern => {
+                let (bodies, features) = self.pattern_targets()?;
+                FeatureKind::Pattern(PatternFeature {
+                    bodies,
+                    features,
+                    kind: PatternKind::Circular { axis: self.axis(1)?, count: self.e(0), angle: self.e(1) },
+                    join: self.flags[0].1,
+                })
+            }
             T::Combine => {
                 let target = match self.one(0)? {
                     Pick::Body(n) => n.clone(),
@@ -541,7 +622,13 @@ impl FeatureSession {
                     HoleHead::Counterbore { diameter, depth } => (1, diameter.clone(), depth.clone(), "90".into()),
                     HoleHead::Countersink { diameter, angle } => (2, diameter.clone(), "3 mm".into(), angle.clone()),
                 };
-                (T::Hole, vec![vec![Pick::Face(h.face)]], vec![h.diameter.clone(), h.depth.clone(), hd, hdepth, angle], vec![h.through], op)
+                let (picks, flip) = match &h.placement {
+                    HolePlacement::Face(f) => (vec![Pick::Face(*f)], false),
+                    HolePlacement::Points { sketch, points, flip } => {
+                        (points.iter().map(|q| Pick::SketchPoint(*sketch, *q)).collect(), *flip)
+                    }
+                };
+                (T::Hole, vec![picks], vec![h.diameter.clone(), h.depth.clone(), hd, hdepth, angle], vec![h.through, flip], op)
             }
             FeatureKind::Mirror(m) => (
                 T::Mirror,
@@ -646,6 +733,12 @@ impl FeatureSession {
             flag.1 = v;
         }
         s.op = op;
+        if let FeatureKind::Pattern(p) = kind {
+            if !p.features.is_empty() {
+                s.set_pattern_features(true);
+                s.features = p.features.clone();
+            }
+        }
         s.active = s.first_empty();
         Some(s)
     }
@@ -745,6 +838,12 @@ impl FerroApp {
             SelKind::Curve => {
                 let sketches = self.visible_sketches();
                 self.pick_curve(pos, vp, &sketches).map(|(s, e)| Pick::Curve(s, e))
+            }
+            SelKind::HolePosition => {
+                let sketches = self.visible_sketches();
+                self.pick_sketch_point(pos, vp, &sketches)
+                    .map(|(s, p)| Pick::SketchPoint(s, p))
+                    .or_else(|| self.pick_face(pos, vp).filter(|f| f.planar).map(|f| Pick::Face(f.face)))
             }
             SelKind::Axis => {
                 let mut candidates: Vec<(AxisRef, Vec3, Vec3)> =
@@ -876,6 +975,13 @@ impl FerroApp {
                     }
                 }
             }
+            Pick::SketchPoint(s, q) => {
+                if let Some(sf) = self.doc.sketch(*s).filter(|sf| q.0 < sf.sketch.point_ids().count()) {
+                    if let Some(c) = self.to_screen(sf.plane.to_world(sf.sketch.point_pos(*q)), vp) {
+                        painter.circle(c, 5.0, color, Stroke::new(1.0, Color32::BLACK));
+                    }
+                }
+            }
         }
     }
 
@@ -903,6 +1009,16 @@ impl FerroApp {
                             pts.push(f);
                         }
                         painter.add(egui::Shape::line(pts, Stroke::new(1.0, theme::ACCENT)));
+                    }
+                }
+            }
+            SelKind::HolePosition => {
+                for id in self.visible_sketches() {
+                    let Some(sf) = self.doc.sketch(id) else { continue };
+                    for q in self.sketch_points(id) {
+                        if let Some(c) = self.to_screen(sf.plane.to_world(sf.sketch.point_pos(q)), vp) {
+                            painter.circle_stroke(c, 3.5, Stroke::new(1.2, theme::ACCENT));
+                        }
                     }
                 }
             }
@@ -958,6 +1074,27 @@ impl FerroApp {
         let params = self.doc.params.clone();
         let preview_error = self.preview.as_ref().and_then(|p| p.error.clone());
         let viewport = self.viewport_rect;
+        // Features a pattern can repeat: those that leave tool solids, before this one.
+        let end = match &self.mode {
+            Mode::Feature(s) => s.editing.and_then(|id| self.doc.index_of(id)).unwrap_or(self.doc.marker()),
+            _ => return,
+        };
+        let patternable: Vec<(FeatureId, String)> = self.doc.features()[..end.min(self.doc.features().len())]
+            .iter()
+            .filter(|f| !f.suppressed)
+            .filter(|f| {
+                matches!(
+                    f.kind,
+                    FeatureKind::Extrude(_)
+                        | FeatureKind::Revolve(_)
+                        | FeatureKind::Hole(_)
+                        | FeatureKind::Loft(_)
+                        | FeatureKind::Sweep(_)
+                        | FeatureKind::PressPull(_)
+                )
+            })
+            .map(|f| (f.id, f.name.clone()))
+            .collect();
         let Mode::Feature(sess) = &mut self.mode else { return };
         let built = sess.build();
         let exprs_ok = sess.exprs.iter().all(|e| params.eval(&e.text).is_ok());
@@ -966,9 +1103,45 @@ impl FerroApp {
         let icon = sess.ty.icon();
 
         let action = command_dialog(ctx, viewport, title, icon, ready, |ui| {
+            let is_pattern = matches!(sess.ty, FeatureType::RectPattern | FeatureType::CircPattern);
+            if is_pattern {
+                form_label(ui, "Objects");
+                let mut on = sess.pattern_features;
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut on, false, "Bodies");
+                    ui.selectable_value(&mut on, true, "Features");
+                });
+                if on != sess.pattern_features {
+                    sess.set_pattern_features(on);
+                }
+                ui.end_row();
+                if sess.pattern_features {
+                    form_label(ui, "Features");
+                    ui.vertical(|ui| {
+                        if patternable.is_empty() {
+                            ui.weak("No extrude, revolve, hole, loft, sweep or press pull yet");
+                        }
+                        for (id, name) in &patternable {
+                            let mut on = sess.features.contains(id);
+                            if ui.checkbox(&mut on, name.as_str()).changed() {
+                                if on {
+                                    sess.features.push(*id);
+                                } else {
+                                    sess.features.retain(|f| f != id);
+                                }
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
+            }
             let active = sess.active;
             let mut activate = None;
+            let hide_bodies = is_pattern && sess.pattern_features;
             for (i, input) in sess.sels.iter_mut().enumerate() {
+                if hide_bodies && i == 0 {
+                    continue;
+                }
                 form_label(ui, input.label);
                 ui.horizontal(|ui| {
                     let n = input.picks.len();
@@ -1115,5 +1288,6 @@ pub fn pick_label(p: &Pick) -> String {
         Pick::Plane(PlaneRef::Construction(id)) => format!("plane #{}", id.0),
         Pick::Axis(a) => a.label(),
         Pick::Curve(..) => "1 curve".into(),
+        Pick::SketchPoint(..) => "1 point".into(),
     }
 }

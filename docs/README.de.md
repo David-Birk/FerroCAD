@@ -52,10 +52,13 @@ aktiven Werkzeug.
 
 ### Körper
 
-- **Erstellen:** Extrusion (E, eine Seite/zwei Seiten/symmetrisch, Flip, Verjüngungswinkel, auf
-  Flächen standardmäßig Vereinigen), Drehung
-  (Achse: Skizzenachse, Skizzenlinie, Welt- oder Konstruktionsachse), Loft, Sweep, Bohrung (H,
-  einfach/Senkung/Kegelsenkung), Rechteck- und Kreismuster, Spiegeln.
+- **Erstellen:** Extrusion (E; Abstand, *bis Objekt* (bis zu einer Ebene oder ebenen Fläche, auch
+  schräg) oder *Alle*; eine Seite/zwei Seiten/symmetrisch, Flip, Verjüngungswinkel, dünne Wand
+  innen/außen/mittig; auf Flächen standardmäßig Vereinigen), Drehung (Achse: Skizzenachse,
+  Skizzenlinie, Welt- oder Konstruktionsachse), Loft, Sweep, Bohrung (H; auf einer Fläche oder auf
+  Skizzenpunkten – Kreismittelpunkte, Linienenden, Punkte – einfach/Senkung/Kegelsenkung), Rechteck-
+  und Kreismuster von Körpern oder von Features (Bohrungen, Ausschnitte, Aufsätze wiederholen),
+  Spiegeln.
 - **Ändern:** Drücken/Ziehen (Q) einer Fläche, Verrundung (F), Fase (gleicher Abstand oder zwei
   Abstände), Formschräge (Draft: Flächen um eine neutrale Ebene neigen), Wandstärke (Shell), Kombinieren,
   Körper teilen, Verschieben/Kopieren (M), Entfernen (Entf), Parameter (Benutzer- und

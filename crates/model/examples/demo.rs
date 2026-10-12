@@ -31,6 +31,8 @@ fn main() {
             operation: Operation::NewBody,
             distance2: None,
             taper: "0".into(),
+            extent: ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
 
@@ -56,6 +58,8 @@ fn main() {
             operation: Operation::Join,
             distance2: None,
             taper: "0".into(),
+            extent: ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
 
@@ -63,12 +67,12 @@ fn main() {
     let boss_top = FaceRef { point: [15.0, 20.0, 22.0], normal: [0.0, 0.0, 1.0] };
     doc.add(
         "Hole1",
-        FeatureKind::Hole(HoleFeature { face: boss_top, diameter: "6 mm".into(), depth: "0".into(), through: true, head: HoleHead::None }),
+        FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(boss_top), diameter: "6 mm".into(), depth: "0".into(), through: true, head: HoleHead::None }),
     );
     doc.add(
         "Hole2",
         FeatureKind::Hole(HoleFeature {
-            face: FaceRef { point: [45.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0] },
+            placement: HolePlacement::Face(FaceRef { point: [45.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0] }),
             diameter: "4 mm".into(),
             depth: "6 mm".into(),
             through: false,

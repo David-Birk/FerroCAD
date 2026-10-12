@@ -1,3 +1,4 @@
 /target
 *.step
 *.stl
+.claude/worktrees/

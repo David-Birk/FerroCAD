@@ -9,7 +9,7 @@ use ferrocad_model::geom::{distance, scale, Vec3};
 use ferrocad_model::kernel::polyline_midpoint;
 use ferrocad_model::{
     BooleanOp, EdgeRef, FaceInfo, FaceRef, Kernel, KernelError, Loop3, MassProperties, PlacedProfile, Seg3,
-    Transform, TriMesh,
+    ThinSide, Transform, TriMesh,
 };
 use glam::{dvec3, DVec3};
 use opencascade::primitives::Shape;
@@ -152,6 +152,38 @@ impl Kernel for OcctKernel {
         // LocOpe_DPrism measures along the drafted side, not perpendicular.
         let c = taper.cos();
         Ok(Rc::new(safe::draft_prism(&face, h1 / c, h2 / c, angle, false).map_err(err)?))
+    }
+
+    fn extrude_thin(
+        &self,
+        profile: &PlacedProfile,
+        forward: f64,
+        backward: f64,
+        thickness: f64,
+        side: ThinSide,
+    ) -> Result<Self::Solid, KernelError> {
+        // Distance of the wall into the material and out of it.
+        let into = match side {
+            ThinSide::Inside => thickness,
+            ThinSide::Outside => 0.0,
+            ThinSide::Center => thickness / 2.0,
+        };
+        let out = thickness - into;
+        let n = v(profile.normal).normalize();
+        // One band per loop; material lies inside the outer loop and outside the holes.
+        let mut result: Option<Shape> = None;
+        let loops = std::iter::once((&profile.outer, true)).chain(profile.holes.iter().map(|h| (h, false)));
+        for (l, outer) in loops {
+            let single = PlacedProfile { outer: l.clone(), holes: vec![], normal: profile.normal };
+            let face = profile_face(&single)?;
+            let (grow, shrink) = if outer { (out, into) } else { (into, out) };
+            let band = safe::thin_band(&face, n, forward, backward, grow, shrink).map_err(err)?;
+            result = Some(match result {
+                None => band,
+                Some(r) => safe::boolean(&r, &band, BoolOp::Union).map_err(err)?,
+            });
+        }
+        Ok(Rc::new(result.expect("the outer loop always exists")))
     }
 
     fn revolve(
@@ -418,6 +450,34 @@ mod tests {
     }
 
     #[test]
+    fn thin_extrudes() {
+        let k = OcctKernel::new();
+
+        let pi = std::f64::consts::PI;
+        let vol = |side, b| volume(&k, &k.extrude_thin(&rect(10.0, 10.0), 10.0, b, 1.0, side).unwrap());
+        // Inside: 10 × 10 minus 8 × 8.
+        assert!((vol(ThinSide::Inside, 0.0) - 360.0).abs() < 1e-6, "{}", vol(ThinSide::Inside, 0.0));
+        // Outside: a rounded 12 × 12 square around the profile.
+        let outside = (4.0 * 10.0 + pi) * 10.0;
+        assert!((vol(ThinSide::Outside, 0.0) - outside).abs() < 1e-3, "{}", vol(ThinSide::Outside, 0.0));
+        let center = (100.0 + 20.0 + pi / 4.0 - 81.0) * 10.0;
+        assert!((vol(ThinSide::Center, 0.0) - center).abs() < 1e-3, "{}", vol(ThinSide::Center, 0.0));
+        // Two sides: 10 up and 5 down.
+        let two = k.extrude_thin(&rect(10.0, 10.0), 10.0, 5.0, 1.0, ThinSide::Inside).unwrap();
+        assert!((volume(&k, &two) - 540.0).abs() < 1e-6);
+        assert_eq!(k.bounds_z(&two), (-5.0, 10.0));
+        // A wall thicker than half the profile fills it.
+        let full = k.extrude_thin(&rect(4.0, 4.0), 1.0, 0.0, 3.0, ThinSide::Inside).unwrap();
+        assert!((volume(&k, &full) - 16.0).abs() < 1e-6);
+        // A profile with a hole gets walls around the hole too.
+        let mut ring = rect(10.0, 10.0);
+        ring.holes.push(Loop3 { segments: vec![Seg3::Circle { center: [5.0, 5.0, 0.0], normal: [0.0, 0.0, 1.0], radius: 2.0 }] });
+        let walls = k.extrude_thin(&ring, 1.0, 0.0, 0.5, ThinSide::Inside).unwrap();
+        let expected = (100.0 - 81.0) + (pi * 2.5 * 2.5 - pi * 4.0);
+        assert!((volume(&k, &walls) - expected).abs() < 1e-3, "{} vs {expected}", volume(&k, &walls));
+    }
+
+    #[test]
     fn step_roundtrip_keeps_every_solid() {
         let k = OcctKernel::new();
         let a = k.extrude(&rect(10.0, 20.0), 5.0, false).unwrap();
@@ -505,13 +565,15 @@ mod hole_tests {
                 operation: Operation::NewBody,
                 distance2: None,
                 taper: "0".into(),
+                extent: ExtrudeExtent::Distance,
+                thin: None,
             }),
         );
         let face = |x: f64| FaceRef { point: [x, 10.0, 10.0], normal: [0.0, 0.0, 1.0] };
         doc.add(
             "Hole1",
             FeatureKind::Hole(HoleFeature {
-                face: face(10.0),
+                placement: HolePlacement::Face(face(10.0)),
                 diameter: "4".into(),
                 depth: "0".into(),
                 through: true,
@@ -521,7 +583,7 @@ mod hole_tests {
         doc.add(
             "Hole2",
             FeatureKind::Hole(HoleFeature {
-                face: face(30.0),
+                placement: HolePlacement::Face(face(30.0)),
                 diameter: "4".into(),
                 depth: "0".into(),
                 through: true,
@@ -564,6 +626,8 @@ mod joint_tests {
                 operation: Operation::NewBody,
                 distance2: None,
                 taper: "0".into(),
+                extent: ExtrudeExtent::Distance,
+                thin: None,
             }),
         );
         let mut pin = SketchFeature::new(Plane::XY);
@@ -579,6 +643,8 @@ mod joint_tests {
                 operation: Operation::NewBody,
                 distance2: None,
                 taper: "0".into(),
+                extent: ExtrudeExtent::Distance,
+                thin: None,
             }),
         );
         // Bottom edge of the pin onto the top edge of the hole.

@@ -127,6 +127,16 @@ Dependency direction: `sketch` ← `model` ← `view`, and `kernel-occt` ← `ap
 - **Extrude extents:** `ExtrudeFeature::distance2` (two sides, against the normal) and `taper`
   (degrees, positive narrows) go through `Kernel::extrude_tapered` (OCCT `LocOpe_DPrism`, heights
   divided by cos(taper) because it measures along the slant); plain extrudes keep `Kernel::extrude`.
+- **Extrude end conditions:** `ExtrudeFeature::extent` is `Distance`, `All` (cut/intersect only,
+  `THROUGH_ALL` = 1e4 mm) or `To(PlaneRef)`; a tilted target is reached by extruding past it and
+  subtracting a half-space block. `thin: Option<ThinWall>` → `Kernel::extrude_thin`, built per loop
+  (outer boundary and each hole get their own band from `BRepOffsetAPI_MakeOffset`, then fused).
+- **Feature patterns:** extrude/revolve/loft/sweep/hole/press-pull record their tool solids in
+  `Model::tools` (`FeatureTool`: solid, operation, bodies). `PatternFeature::features` replays those
+  tools transformed (cuts hit every body, joins/intersects their original bodies).
+- **Holes on sketch points:** `HoleFeature::placement` is `Face(FaceRef)` or `Points { sketch,
+  points, flip }`; holes go against the sketch normal. In the UI `SelKind::HolePosition` picks a flat
+  face or `Pick::SketchPoint`s.
 - **Draft** (`DraftFeature`): faces tilted around the neutral plane `pull` (`BRepOffsetAPI_DraftAngle`);
   positive angles narrow the body along the pull direction. Two-distance chamfers are
   `FilletFeature::distance2` → `Kernel::chamfer_two` (first distance on the edge's first adjacent face).

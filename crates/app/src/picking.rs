@@ -7,7 +7,7 @@ use ferrocad_model::geom::{cross, distance, dot, normalize, scale, sub, Vec3};
 use ferrocad_model::kernel::polyline_midpoint;
 use ferrocad_model::{EdgeRef, FaceRef, FeatureId, FeatureKind, ProfileRef};
 use ferrocad_sketch::profile::profile_at;
-use ferrocad_sketch::{find_profiles, EntityId};
+use ferrocad_sketch::{find_profiles, EntityId, PointId};
 use ferrocad_view::{face_component, point_segment_distance, ray_mesh, Viewport};
 
 pub const PICK_PX: f64 = 8.0;
@@ -165,6 +165,32 @@ impl FerroApp {
             }
         }
         best.map(|(_, s, e)| (s, e))
+    }
+
+    /// Points of the given sketches that holes can sit on: ends, centres and
+    /// fit points of live curves, plus standalone points.
+    pub fn sketch_points(&self, sketch: FeatureId) -> Vec<PointId> {
+        let Some(sf) = self.doc.sketch(sketch) else { return vec![] };
+        let mut used: Vec<PointId> = sf.sketch.entities().flat_map(|(_, e)| e.points()).collect();
+        used.sort_by_key(|p| p.0);
+        used.dedup();
+        used
+    }
+
+    /// The sketch point under the cursor.
+    pub fn pick_sketch_point(&self, pos: Pos2, vp: &Viewport, sketches: &[FeatureId]) -> Option<(FeatureId, PointId)> {
+        let mut best: Option<(f64, FeatureId, PointId)> = None;
+        for &id in sketches {
+            let Some(sf) = self.doc.sketch(id) else { continue };
+            for pid in self.sketch_points(id) {
+                let Some(s) = self.camera.project(sf.plane.to_world(sf.sketch.point_pos(pid)), vp) else { continue };
+                let d = (s[0] - pos.x as f64).hypot(s[1] - pos.y as f64);
+                if d < PICK_PX && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, id, pid));
+                }
+            }
+        }
+        best.map(|(_, s, p)| (s, p))
     }
 
     /// Screen distance from the cursor to an infinite 3D line.

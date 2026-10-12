@@ -45,7 +45,21 @@ pub struct Model<S> {
     pub axes: HashMap<FeatureId, (Vec3, Vec3)>,
     /// Components: (name, body names).
     pub components: Vec<(String, Vec<String>)>,
+    /// Tool solids features added to or cut from bodies (for feature patterns).
+    pub tools: HashMap<FeatureId, Vec<FeatureTool<S>>>,
 }
+
+/// A solid a feature joined, cut or intersected with `bodies` (or made a new
+/// body from), kept so feature patterns can repeat it.
+#[derive(Clone, Debug)]
+pub struct FeatureTool<S> {
+    pub solid: S,
+    pub operation: Operation,
+    pub bodies: Vec<String>,
+}
+
+/// Length standing in for "through everything".
+const THROUGH_ALL: f64 = 1e4;
 
 impl<S> Model<S> {
     pub fn empty() -> Self {
@@ -55,6 +69,7 @@ impl<S> Model<S> {
             planes: HashMap::new(),
             axes: HashMap::new(),
             components: Vec::new(),
+            tools: HashMap::new(),
         }
     }
 
@@ -284,26 +299,96 @@ impl Document {
 
             FeatureKind::Extrude(e) => {
                 let e = e.clone();
-                let distance = params.eval(&e.distance).map_err(|e| e.to_string())?;
-                if distance.abs() < 1e-9 {
-                    return Err("distance is zero".into());
-                }
                 let (_, placed) = self.placed_profile(i, e.sketch, e.profile_point)?;
                 let taper = eval(&e.taper)?;
                 if taper.abs() >= 89.0 {
                     return Err("taper must be between -89° and 89°".into());
                 }
-                let tool = match (&e.distance2, taper.abs() > 1e-12) {
-                    (None, false) => k.extrude(&placed, distance, e.symmetric).map_err(kerr)?,
-                    (d2, _) => {
-                        let (fwd, back) = match d2 {
+                let tapered = taper.abs() > 1e-12;
+                let n = placed.normal;
+                // Half-space beyond a tilted "to" target, cut off at the end.
+                let mut trim: Option<PlacedProfile> = None;
+                let (fwd, back) = match &e.extent {
+                    ExtrudeExtent::Distance => {
+                        let distance = eval(&e.distance)?;
+                        if distance.abs() < 1e-9 {
+                            return Err("distance is zero".into());
+                        }
+                        match &e.distance2 {
                             Some(d2) => (distance, eval(d2)?),
                             None if e.symmetric => (distance / 2.0, distance / 2.0),
                             None => (distance, 0.0),
-                        };
-                        k.extrude_tapered(&placed, fwd, back, taper.to_radians()).map_err(kerr)?
+                        }
+                    }
+                    ExtrudeExtent::All => {
+                        if matches!(e.operation, Operation::NewBody | Operation::Join) {
+                            return Err("\"All\" only works with Cut or Intersect".into());
+                        }
+                        if tapered {
+                            return Err("\"All\" can't be tapered".into());
+                        }
+                        let flip = eval(&e.distance).is_ok_and(|d| d < 0.0);
+                        match (e.symmetric || e.distance2.is_some(), flip) {
+                            (true, _) => (THROUGH_ALL, THROUGH_ALL),
+                            (false, false) => (THROUGH_ALL, 0.0),
+                            (false, true) => (-THROUGH_ALL, 0.0),
+                        }
+                    }
+                    ExtrudeExtent::To(target) => {
+                        if e.symmetric || e.distance2.is_some() {
+                            return Err("extrude \"To\" goes one way only".into());
+                        }
+                        let target = resolve_plane(k, model, target)?;
+                        let tn = target.normal();
+                        let denom = dot(n, tn);
+                        if denom.abs() < 1e-6 {
+                            return Err("the target is parallel to the extrude direction".into());
+                        }
+                        // Distance along the normal from each profile point to the target.
+                        let pts = loop_points(&placed.outer);
+                        let reach: Vec<f64> = pts.iter().map(|p| dot(sub(target.origin, *p), tn) / denom).collect();
+                        let (lo, hi) = reach.iter().fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
+                        if lo * hi <= 1e-12 {
+                            return Err("the target touches or crosses the profile".into());
+                        }
+                        if length(cross(n, tn)) < 1e-6 {
+                            (reach[0], 0.0)
+                        } else {
+                            // Go past the farthest point, then cut off beyond the target.
+                            let far = if hi > 0.0 { hi } else { lo };
+                            let center = scale(pts.iter().fold([0.0; 3], |c, p| add(c, *p)), 1.0 / pts.len() as f64);
+                            let on_target = sub(center, scale(tn, dot(sub(center, target.origin), tn)));
+                            let away = if dot(sub(target.origin, center), tn) > 0.0 { tn } else { scale(tn, -1.0) };
+                            let size = 2.0 * far.abs() + 1000.0;
+                            let corner = |a: f64, b: f64| add(on_target, add(scale(target.x_axis, a * size), scale(target.y_axis, b * size)));
+                            let pts = [corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)];
+                            let segments = (0..4).map(|j| Seg3::Line { a: pts[j], b: pts[(j + 1) % 4] }).collect();
+                            trim = Some(PlacedProfile { outer: Loop3 { segments }, holes: vec![], normal: away });
+                            (far * 1.05 + far.signum(), 0.0)
+                        }
                     }
                 };
+                let mut tool = match (&e.thin, e.extent, &e.distance2, tapered) {
+                    (Some(thin), ..) => {
+                        if tapered {
+                            return Err("thin extrudes can't be tapered".into());
+                        }
+                        let t = eval(&thin.thickness)?;
+                        if t <= 0.0 {
+                            return Err("wall thickness must be positive".into());
+                        }
+                        k.extrude_thin(&placed, fwd, back, t, thin.side).map_err(kerr)?
+                    }
+                    (None, ExtrudeExtent::Distance, None, false) => {
+                        let distance = if e.symmetric { fwd * 2.0 } else { fwd };
+                        k.extrude(&placed, distance, e.symmetric).map_err(kerr)?
+                    }
+                    _ => k.extrude_tapered(&placed, fwd, back, taper.to_radians()).map_err(kerr)?,
+                };
+                if let Some(half_space) = trim {
+                    let block = k.extrude(&half_space, 2.0 * THROUGH_ALL, false).map_err(kerr)?;
+                    tool = k.boolean(BooleanOp::Subtract, &tool, &block).map_err(kerr)?;
+                }
                 apply_operation(k, model, e.operation, tool, id, body_counter)
             }
 
@@ -437,6 +522,9 @@ impl Document {
                 let tool = k.extrude_face(solid, &pp.face, d).map_err(kerr)?;
                 let op = if d > 0.0 { BooleanOp::Union } else { BooleanOp::Subtract };
                 model.bodies[bi].solid = k.boolean(op, solid, &tool).map_err(kerr)?;
+                let operation = if d > 0.0 { Operation::Join } else { Operation::Cut };
+                let name = model.bodies[bi].name.clone();
+                record_tool(model, id, tool, operation, vec![name]);
                 Ok(())
             }
 
@@ -488,58 +576,90 @@ impl Document {
                 if depth <= 0.0 {
                     return Err("depth must be positive".into());
                 }
-                let (bi, info) = find_face(k, model, &h.face)?;
-                if !info.planar {
-                    return Err("holes need a flat face".into());
-                }
-                let n = normalize(info.normal);
-                // Start a little above the face so the cut is clean.
-                let eps = 0.01;
-                let on_face = sub(h.face.point, scale(n, dot(sub(h.face.point, info.point), n)));
-                let center = add(on_face, scale(n, eps));
-                let profile = PlacedProfile {
-                    outer: Loop3 { segments: vec![Seg3::Circle { center, normal: n, radius: diameter / 2.0 }] },
-                    holes: vec![],
-                    normal: n,
+                // Hole sites: point on the surface and outward normal.
+                let (sites, targets): (Vec<(Vec3, Vec3)>, Vec<usize>) = match &h.placement {
+                    HolePlacement::Face(face) => {
+                        let (bi, info) = find_face(k, model, face)?;
+                        if !info.planar {
+                            return Err("holes need a flat face".into());
+                        }
+                        let n = normalize(info.normal);
+                        let on_face = sub(face.point, scale(n, dot(sub(face.point, info.point), n)));
+                        let targets = if h.through { (0..model.bodies.len()).collect() } else { vec![bi] };
+                        (vec![(on_face, n)], targets)
+                    }
+                    HolePlacement::Points { sketch, points, flip } => {
+                        let s = self.sketch_before(i, *sketch)?;
+                        if points.is_empty() {
+                            return Err("pick at least one sketch point".into());
+                        }
+                        let count = s.sketch.point_ids().count();
+                        let n = if *flip { scale(s.plane.normal(), -1.0) } else { s.plane.normal() };
+                        let mut sites = Vec::new();
+                        for p in points {
+                            if p.0 >= count {
+                                return Err("a hole point no longer exists – re-pick the points".into());
+                            }
+                            sites.push((s.plane.to_world(s.sketch.point_pos(*p)), n));
+                        }
+                        (sites, (0..model.bodies.len()).collect())
+                    }
                 };
-                let mut tools = vec![k.extrude(&profile, -(depth + eps), false).map_err(kerr)?];
-                match &h.head {
-                    HoleHead::None => {}
-                    HoleHead::Counterbore { diameter: hd, depth: hdepth } => {
-                        let (hd, hdepth) = (eval(hd)?, eval(hdepth)?);
-                        if hd <= diameter || hdepth <= 0.0 {
-                            return Err("counterbore must be wider than the hole and have a depth".into());
+                if model.bodies.is_empty() {
+                    return Err("no body to drill into".into());
+                }
+                let mut tools = Vec::new();
+                for (on_face, n) in sites {
+                    // Start a little above the face so the cut is clean.
+                    let eps = 0.01;
+                    let center = add(on_face, scale(n, eps));
+                    let profile = PlacedProfile {
+                        outer: Loop3 { segments: vec![Seg3::Circle { center, normal: n, radius: diameter / 2.0 }] },
+                        holes: vec![],
+                        normal: n,
+                    };
+                    tools.push(k.extrude(&profile, -(depth + eps), false).map_err(kerr)?);
+                    match &h.head {
+                        HoleHead::None => {}
+                        HoleHead::Counterbore { diameter: hd, depth: hdepth } => {
+                            let (hd, hdepth) = (eval(hd)?, eval(hdepth)?);
+                            if hd <= diameter || hdepth <= 0.0 {
+                                return Err("counterbore must be wider than the hole and have a depth".into());
+                            }
+                            let head = PlacedProfile {
+                                outer: Loop3 { segments: vec![Seg3::Circle { center, normal: n, radius: hd / 2.0 }] },
+                                holes: vec![],
+                                normal: n,
+                            };
+                            tools.push(k.extrude(&head, -(hdepth + eps), false).map_err(kerr)?);
                         }
-                        let head = PlacedProfile {
-                            outer: Loop3 { segments: vec![Seg3::Circle { center, normal: n, radius: hd / 2.0 }] },
-                            holes: vec![],
-                            normal: n,
-                        };
-                        tools.push(k.extrude(&head, -(hdepth + eps), false).map_err(kerr)?);
-                    }
-                    HoleHead::Countersink { diameter: hd, angle } => {
-                        let (hd, angle) = (eval(hd)?, eval(angle)?);
-                        if hd <= diameter || !(10.0..170.0).contains(&angle) {
-                            return Err("countersink must be wider than the hole, angle 10–170°".into());
+                        HoleHead::Countersink { diameter: hd, angle } => {
+                            let (hd, angle) = (eval(hd)?, eval(angle)?);
+                            if hd <= diameter || !(10.0..170.0).contains(&angle) {
+                                return Err("countersink must be wider than the hole, angle 10–170°".into());
+                            }
+                            // Cone: revolve a right triangle around the hole axis.
+                            let half = (angle / 2.0).to_radians();
+                            let r = hd / 2.0 + eps * half.tan();
+                            let h_cone = r / half.tan();
+                            let u = normalize(cross(n, if n[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }));
+                            let at = |radial: f64, axial: f64| add(center, add(scale(u, radial), scale(n, axial)));
+                            let (p0, p1, p2) = (at(0.0, 0.0), at(r, 0.0), at(0.0, -h_cone));
+                            let segments = vec![Seg3::Line { a: p0, b: p1 }, Seg3::Line { a: p1, b: p2 }, Seg3::Line { a: p2, b: p0 }];
+                            let profile = PlacedProfile { outer: Loop3 { segments }, holes: vec![], normal: cross(u, n) };
+                            tools.push(k.revolve(&profile, center, n, std::f64::consts::TAU).map_err(kerr)?);
                         }
-                        // Cone: revolve a right triangle around the hole axis.
-                        let half = (angle / 2.0).to_radians();
-                        let r = hd / 2.0 + eps * half.tan();
-                        let h_cone = r / half.tan();
-                        let u = normalize(cross(n, if n[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }));
-                        let at = |radial: f64, axial: f64| add(center, add(scale(u, radial), scale(n, axial)));
-                        let (p0, p1, p2) = (at(0.0, 0.0), at(r, 0.0), at(0.0, -h_cone));
-                        let segments = vec![Seg3::Line { a: p0, b: p1 }, Seg3::Line { a: p1, b: p2 }, Seg3::Line { a: p2, b: p0 }];
-                        let profile = PlacedProfile { outer: Loop3 { segments }, holes: vec![], normal: cross(u, n) };
-                        tools.push(k.revolve(&profile, center, n, std::f64::consts::TAU).map_err(kerr)?);
                     }
                 }
-                let targets: Vec<usize> = if h.through { (0..model.bodies.len()).collect() } else { vec![bi] };
+                let names: Vec<String> = targets.iter().map(|b| model.bodies[*b].name.clone()).collect();
                 for b in targets {
                     for tool in &tools {
                         model.bodies[b].solid =
                             k.boolean(BooleanOp::Subtract, &model.bodies[b].solid, tool).map_err(kerr)?;
                     }
+                }
+                for tool in tools {
+                    record_tool(model, id, tool, Operation::Cut, names.clone());
                 }
                 Ok(())
             }
@@ -600,6 +720,37 @@ impl Document {
                 }
                 if transforms.is_empty() {
                     return Err("the pattern has only one instance".into());
+                }
+                if !p.features.is_empty() {
+                    let mut sources = Vec::new();
+                    for f in &p.features {
+                        let tools = model.tools.get(f).cloned().ok_or(
+                            "a patterned feature has no geometry (pattern extrudes, revolves, holes, lofts, sweeps or press pulls)",
+                        )?;
+                        sources.extend(tools);
+                    }
+                    for t in &transforms {
+                        for src in &sources {
+                            let copy = k.transform(&src.solid, t).map_err(kerr)?;
+                            match src.operation {
+                                Operation::NewBody => push_body(model, body_counter, copy, id),
+                                // Copies of cuts may land on any body.
+                                Operation::Cut => {
+                                    for b in &mut model.bodies {
+                                        b.solid = k.boolean(BooleanOp::Subtract, &b.solid, &copy).map_err(kerr)?;
+                                    }
+                                }
+                                op => {
+                                    let bop = if op == Operation::Join { BooleanOp::Union } else { BooleanOp::Intersect };
+                                    for name in &src.bodies {
+                                        let bi = body_index(model, name)?;
+                                        model.bodies[bi].solid = k.boolean(bop, &model.bodies[bi].solid, &copy).map_err(kerr)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Ok(());
                 }
                 for name in &expand(model, &p.bodies) {
                     let bi = body_index(model, name)?;
@@ -831,6 +982,30 @@ impl Document {
     }
 }
 
+fn record_tool<S>(model: &mut Model<S>, feature: FeatureId, solid: S, operation: Operation, bodies: Vec<String>) {
+    model.tools.entry(feature).or_default().push(FeatureTool { solid, operation, bodies });
+}
+
+/// Points on a loop, enough to bound it (ends, arc middles, circle extremes).
+fn loop_points(l: &Loop3) -> Vec<Vec3> {
+    let mut out = Vec::new();
+    for s in &l.segments {
+        match s {
+            Seg3::Line { a, b } => out.extend([*a, *b]),
+            Seg3::Arc { start, mid, end } => out.extend([*start, *mid, *end]),
+            Seg3::Circle { center, normal, radius } => {
+                let u = normalize(cross(*normal, if normal[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }));
+                let w = cross(*normal, u);
+                for d in [u, w, scale(u, -1.0), scale(w, -1.0)] {
+                    out.push(add(*center, scale(d, *radius)));
+                }
+            }
+            Seg3::Spline { points } => out.extend(points.iter().copied()),
+        }
+    }
+    out
+}
+
 fn push_body<S>(model: &mut Model<S>, body_counter: &mut usize, solid: S, created_by: FeatureId) {
     *body_counter += 1;
     model.bodies.push(Body { name: format!("Body{body_counter}"), solid, created_by });
@@ -1054,13 +1229,28 @@ fn apply_operation<K: Kernel>(
 ) -> Result<(), String> {
     let mut new_body = |model: &mut Model<K::Solid>, solid| {
         *body_counter += 1;
-        model.bodies.push(Body { name: format!("Body{body_counter}"), solid, created_by });
+        let name = format!("Body{body_counter}");
+        model.bodies.push(Body { name: name.clone(), solid, created_by });
+        (Operation::NewBody, name)
     };
+    let mut touched = Vec::new();
+    let mut operation = op;
     match op {
-        Operation::NewBody => new_body(model, tool),
+        Operation::NewBody => {
+            let (o, name) = new_body(model, tool.clone());
+            touched.push(name);
+            operation = o;
+        }
         Operation::Join => match model.bodies.last_mut() {
-            Some(b) => b.solid = k.boolean(BooleanOp::Union, &b.solid, &tool).map_err(|e| e.0)?,
-            None => new_body(model, tool),
+            Some(b) => {
+                b.solid = k.boolean(BooleanOp::Union, &b.solid, &tool).map_err(|e| e.0)?;
+                touched.push(b.name.clone());
+            }
+            None => {
+                let (o, name) = new_body(model, tool.clone());
+                touched.push(name);
+                operation = o;
+            }
         },
         Operation::Cut => {
             if model.bodies.is_empty() {
@@ -1068,12 +1258,15 @@ fn apply_operation<K: Kernel>(
             }
             for b in &mut model.bodies {
                 b.solid = k.boolean(BooleanOp::Subtract, &b.solid, &tool).map_err(|e| e.0)?;
+                touched.push(b.name.clone());
             }
         }
         Operation::Intersect => {
             let b = model.bodies.last_mut().ok_or("nothing to intersect")?;
             b.solid = k.boolean(BooleanOp::Intersect, &b.solid, &tool).map_err(|e| e.0)?;
+            touched.push(b.name.clone());
         }
     }
+    record_tool(model, created_by, tool, operation, touched);
     Ok(())
 }

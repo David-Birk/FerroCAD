@@ -72,6 +72,9 @@ impl FerroApp {
         match &self.mode {
             Mode::Extrude(sess) => {
                 let (Some(sk), Some(pp)) = (sess.sketch, sess.profile_point) else { return };
+                if sess.extent != crate::dialogs::Extent::Distance {
+                    return;
+                }
                 let Some(sf) = self.doc.sketch(sk) else { return };
                 // Arrow from the profile's centre.
                 let profiles = find_profiles(&sf.sketch);

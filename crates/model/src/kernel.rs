@@ -204,6 +204,18 @@ pub trait Kernel {
         chamfer: bool,
     ) -> Result<Self::Solid, KernelError>;
 
+    /// Extrude only a wall of `thickness` along the profile's boundary
+    /// (inside, outside or centred on it), `forward` along the normal and
+    /// `backward` against it.
+    fn extrude_thin(
+        &self,
+        profile: &PlacedProfile,
+        forward: f64,
+        backward: f64,
+        thickness: f64,
+        side: crate::feature::ThinSide,
+    ) -> Result<Self::Solid, KernelError>;
+
     /// Chamfer `edges` with `d1` on the first adjacent face and `d2` on the
     /// other one.
     fn chamfer_two(&self, solid: &Self::Solid, edges: &[EdgeRef], d1: f64, d2: f64)

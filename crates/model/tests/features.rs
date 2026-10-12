@@ -72,7 +72,7 @@ fn shell_hole_and_remove() {
     doc.add("Shell1", FeatureKind::Shell(ShellFeature { faces: vec![top_face()], thickness: "1".into() }));
     doc.add(
         "Hole1",
-        FeatureKind::Hole(HoleFeature { face: top_face(), diameter: "4".into(), depth: "3".into(), through: false, head: HoleHead::None }),
+        FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(top_face()), diameter: "4".into(), depth: "3".into(), through: false, head: HoleHead::None }),
     );
     let m = doc.rebuild(&Mock);
     assert!(m.errors().next().is_none());
@@ -101,6 +101,7 @@ fn mirror_pattern_move_make_bodies() {
         "Pattern1",
         FeatureKind::Pattern(PatternFeature {
             bodies: vec!["Body2".into()],
+            features: vec![],
             kind: PatternKind::Circular { axis: AxisRef::World(2), count: "4".into(), angle: "360".into() },
             join: false,
         }),
@@ -109,6 +110,7 @@ fn mirror_pattern_move_make_bodies() {
         "Pattern2",
         FeatureKind::Pattern(PatternFeature {
             bodies: vec!["Body1".into()],
+            features: vec![],
             kind: PatternKind::Rectangular {
                 direction: AxisRef::World(0),
                 count: "2".into(),
@@ -239,12 +241,13 @@ fn every_new_feature_roundtrips_through_fcad() {
     doc.add("Axis2", FeatureKind::Axis(AxisFeature { source: AxisSource::FaceNormal(top_face()) }));
     doc.add("PP", FeatureKind::PressPull(PressPullFeature { face: top_face(), distance: "1".into() }));
     doc.add("Shell", FeatureKind::Shell(ShellFeature { faces: vec![top_face()], thickness: "1".into() }));
-    doc.add("Hole", FeatureKind::Hole(HoleFeature { face: top_face(), diameter: "3".into(), depth: "2".into(), through: true, head: HoleHead::None }));
+    doc.add("Hole", FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(top_face()), diameter: "3".into(), depth: "2".into(), through: true, head: HoleHead::None }));
     doc.add("Mirror", FeatureKind::Mirror(MirrorFeature { bodies: vec!["Body1".into()], plane: PlaneRef::Origin(OriginPlane::XZ), join: true }));
     doc.add(
         "PatR",
         FeatureKind::Pattern(PatternFeature {
             bodies: vec!["Body1".into()],
+            features: vec![],
             kind: PatternKind::Rectangular {
                 direction: AxisRef::Construction(axis),
                 count: "3".into(),
@@ -260,6 +263,7 @@ fn every_new_feature_roundtrips_through_fcad() {
         "PatC",
         FeatureKind::Pattern(PatternFeature {
             bodies: vec!["Body1".into()],
+            features: vec![],
             kind: PatternKind::Circular { axis: AxisRef::World(2), count: "6".into(), angle: "360".into() },
             join: true,
         }),
@@ -323,7 +327,7 @@ fn revolve_around_world_and_construction_axes() {
 fn counterbore_and_countersink_add_tools() {
     let (mut doc, _, _) = plate_document();
     let hole = |head| {
-        FeatureKind::Hole(HoleFeature { face: top_face(), diameter: "4".into(), depth: "3".into(), through: false, head })
+        FeatureKind::Hole(HoleFeature { placement: HolePlacement::Face(top_face()), diameter: "4".into(), depth: "3".into(), through: false, head })
     };
     doc.add("Hole1", hole(HoleHead::Counterbore { diameter: "8".into(), depth: "2".into() }));
     doc.add("Hole2", hole(HoleHead::Countersink { diameter: "8".into(), angle: "90".into() }));
@@ -470,6 +474,8 @@ fn bodies_made_while_a_component_is_active_belong_to_it() {
             operation: Operation::NewBody,
             distance2: None,
             taper: "0".into(),
+            extent: ExtrudeExtent::Distance,
+            thin: None,
         }),
     );
     doc.view.active_component = None;
@@ -584,4 +590,137 @@ fn midplane_between_two_faces() {
         p.base2 = Some(PlaneRef::Origin(OriginPlane::XZ));
     }
     assert!(matches!(doc.rebuild(&Mock).status(mid), FeatureStatus::Error(_)));
+}
+
+/// A cut extrude of a 2 × 2 square on the XY plane at (5, 5).
+fn square_cut(doc: &mut Document, extent: ExtrudeExtent) -> FeatureId {
+    let mut sf = SketchFeature::new(Plane::XY);
+    sf.sketch.add_rectangle([4.0, 4.0], [6.0, 6.0]);
+    let sketch = doc.add("Sketch2", FeatureKind::Sketch(sf));
+    doc.add(
+        "Extrude2",
+        FeatureKind::Extrude(ExtrudeFeature {
+            sketch,
+            profile_point: [5.0, 5.0],
+            distance: "1".into(),
+            symmetric: false,
+            operation: Operation::Cut,
+            distance2: None,
+            taper: "0".into(),
+            extent,
+            thin: None,
+        }),
+    )
+}
+
+#[test]
+fn extrude_all_and_to_a_face() {
+    let (mut doc, _, _) = plate_document();
+    let cut = square_cut(&mut doc, ExtrudeExtent::All);
+    let m = doc.rebuild(&Mock);
+    assert_eq!(*m.status(cut), FeatureStatus::Ok, "{:?}", m.status(cut));
+    assert!(body_descs(&m)[0].contains("taper(segs=4, f=10000, b=0, t=0.0)"), "{:?}", body_descs(&m));
+    // "All" makes no sense for new bodies.
+    if let FeatureKind::Extrude(e) = &mut doc.feature_mut(cut).unwrap().kind {
+        e.operation = Operation::NewBody;
+    }
+    assert!(matches!(doc.rebuild(&Mock).status(cut), FeatureStatus::Error(_)));
+
+    // Up to the plate's top face (5 above the sketch).
+    if let FeatureKind::Extrude(e) = &mut doc.feature_mut(cut).unwrap().kind {
+        e.operation = Operation::Cut;
+        e.extent = ExtrudeExtent::To(PlaneRef::Face(top_face()));
+    }
+    let m = doc.rebuild(&Mock);
+    assert_eq!(*m.status(cut), FeatureStatus::Ok);
+    assert!(body_descs(&m)[0].contains("taper(segs=4, f=5, b=0, t=0.0)"), "{:?}", body_descs(&m));
+    assert_eq!(doc.feature(cut).unwrap().kind.references().len(), 1, "a face is no feature reference");
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
+
+    // A target that crosses the profile is an error.
+    if let FeatureKind::Extrude(e) = &mut doc.feature_mut(cut).unwrap().kind {
+        e.extent = ExtrudeExtent::To(PlaneRef::Origin(OriginPlane::XZ));
+    }
+    assert!(matches!(doc.rebuild(&Mock).status(cut), FeatureStatus::Error(_)));
+}
+
+#[test]
+fn thin_extrude() {
+    let (mut doc, _, extrude) = plate_document();
+    if let FeatureKind::Extrude(e) = &mut doc.feature_mut(extrude).unwrap().kind {
+        e.thin = Some(ThinWall { thickness: "1.5".into(), side: ThinSide::Outside });
+        e.symmetric = true;
+    }
+    let m = doc.rebuild(&Mock);
+    assert!(m.errors().next().is_none());
+    assert_eq!(body_descs(&m)[0], "Body1: thin(segs=4, f=2.5, b=2.5, t=1.5, Outside)");
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
+    if let FeatureKind::Extrude(e) = &mut doc.feature_mut(extrude).unwrap().kind {
+        e.thin = Some(ThinWall { thickness: "0".into(), side: ThinSide::Inside });
+    }
+    assert!(doc.rebuild(&Mock).errors().next().is_some());
+}
+
+#[test]
+fn holes_on_sketch_points_and_feature_patterns() {
+    let (mut doc, _, _) = plate_document();
+    let mut sf = SketchFeature::new(Plane::XY);
+    sf.attach = Some(PlaneRef::Face(top_face()));
+    let a = sf.sketch.add_point([5.0, 5.0]);
+    let b = sf.sketch.add_point([10.0, 5.0]);
+    let sketch = doc.add("Sketch2", FeatureKind::Sketch(sf));
+    let hole = doc.add(
+        "Hole1",
+        FeatureKind::Hole(HoleFeature {
+            placement: HolePlacement::Points { sketch, points: vec![a, b], flip: false },
+            diameter: "2".into(),
+            depth: "3".into(),
+            through: false,
+            head: HoleHead::None,
+        }),
+    );
+    let m = doc.rebuild(&Mock);
+    assert_eq!(*m.status(hole), FeatureStatus::Ok, "{:?}", m.status(hole));
+    assert_eq!(body_descs(&m)[0].matches("Subtract(").count(), 2, "one hole per point");
+    assert_eq!(m.tools[&hole].len(), 2);
+    assert_eq!(doc.feature(hole).unwrap().kind.references(), vec![sketch]);
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
+
+    // Pattern the hole feature 3 × along X: two more copies of both holes.
+    let pattern = doc.add(
+        "Pattern1",
+        FeatureKind::Pattern(PatternFeature {
+            bodies: vec![],
+            features: vec![hole],
+            kind: PatternKind::Rectangular {
+                direction: AxisRef::World(0),
+                count: "3".into(),
+                spacing: "8".into(),
+                direction2: AxisRef::World(1),
+                count2: "1".into(),
+                spacing2: "0".into(),
+            },
+            join: false,
+        }),
+    );
+    let m = doc.rebuild(&Mock);
+    assert_eq!(*m.status(pattern), FeatureStatus::Ok, "{:?}", m.status(pattern));
+    assert_eq!(m.bodies.len(), 1);
+    let d = &body_descs(&m)[0];
+    assert_eq!(d.matches("Subtract(").count(), 6, "{d}");
+    assert!(d.contains("move[16.0, 0.0, 0.0]"), "{d}");
+    assert_eq!(doc.feature(pattern).unwrap().kind.references(), vec![hole]);
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
+
+    // Deleting a point the hole uses is an error, not a panic.
+    if let FeatureKind::Hole(h) = &mut doc.feature_mut(hole).unwrap().kind {
+        h.placement = HolePlacement::Points { sketch, points: vec![ferrocad_sketch::PointId(99)], flip: true };
+    }
+    let m = doc.rebuild(&Mock);
+    assert!(matches!(m.status(hole), FeatureStatus::Error(_)));
+    assert!(matches!(m.status(pattern), FeatureStatus::Error(_)), "nothing left to pattern");
 }
