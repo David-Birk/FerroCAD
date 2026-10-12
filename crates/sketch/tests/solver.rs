@@ -204,3 +204,40 @@ fn point_to_line_distance() {
     sk.solve().unwrap();
     assert!((sk.point_pos(p)[1] - 2.0).abs() < 1e-6);
 }
+
+/// Fusion's sketch point: a first-class entity that can be constrained,
+/// dimensioned, copied and deleted, and that never forms a profile.
+#[test]
+fn standalone_points_behave_like_sketch_geometry() {
+    let mut sk = Sketch::new();
+    let line = sk.add_line([0.0, 0.0], [20.0, 0.0]);
+    let pe = sk.add_point_entity([7.0, 4.0]);
+    let Entity::Point { p } = *sk.entity(pe) else { panic!("not a point") };
+    assert_eq!(sk.point_entity(p), Some(pe));
+    assert!(sk.used_points().contains(&p));
+    assert_eq!(sk.analyze().dof, 4 + 2);
+    assert!(find_profiles(&sk).is_empty());
+
+    // Dimension it to the line and to the line's start point.
+    let Entity::Line { a, b } = *sk.entity(line) else { unreachable!() };
+    sk.set_point_fixed(a, true);
+    sk.set_point_fixed(b, true);
+    sk.constrain(Constraint::PointLineDistance(p, line, 5.0));
+    sk.constrain(Constraint::HorizontalDistance(a, p, 8.0));
+    sk.solve().unwrap();
+    let q = sk.point_pos(p);
+    assert!(close(q[0], 8.0) && close(q[1], 5.0), "{q:?}");
+    assert!(sk.analyze().is_fully_constrained());
+
+    // Copies (patterns) copy the point too.
+    let copies = sk.copy_transformed(&[pe], &[&|v: [f64; 2]| [v[0] + 10.0, v[1]]]);
+    assert!(matches!(sk.entity(copies[0]), Entity::Point { .. }));
+    let back = Sketch::from_data(sk.to_data()).unwrap();
+    assert_eq!(back.to_data(), sk.to_data());
+
+    // Deleting it drops the dimensions that refer to it.
+    sk.remove_entity(pe);
+    assert_eq!(sk.constraints().count(), 0);
+    assert!(!sk.used_points().contains(&p));
+    assert!(sk.trim(copies[0], [18.0, 5.0]).is_err());
+}

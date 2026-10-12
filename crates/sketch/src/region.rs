@@ -173,6 +173,7 @@ fn collect_curves(sk: &Sketch) -> Vec<Curve> {
             continue;
         }
         match *e {
+            Entity::Point { .. } => {}
             Entity::Line { a, b } => {
                 let (a, b) = (sk.point_pos(a), sk.point_pos(b));
                 if dist(a, b) > 0.0 {

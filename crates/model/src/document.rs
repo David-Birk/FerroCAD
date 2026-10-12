@@ -996,6 +996,7 @@ fn path_segments(sf: &SketchFeature, ids: &[ferrocad_sketch::EntityId]) -> Resul
                 pieces.push((s, e, Seg3::Arc { start: s, mid: m, end: e }));
             }
             Entity::Circle { .. } => return Err("a sweep path cannot contain circles".into()),
+            Entity::Point { .. } => continue,
             Entity::Spline { .. } => {
                 let pts: Vec<Vec3> = sk.spline_points(id, 12).into_iter().map(w).collect();
                 let (s, e) = (pts[0], pts[pts.len() - 1]);

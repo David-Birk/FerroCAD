@@ -146,6 +146,7 @@ impl Sketch {
     fn curves_of(&self, e: EntityId) -> Vec<Curve> {
         match self.entity(e) {
             Entity::Spline { .. } => self.spline_points(e, 12).windows(2).map(|w| Curve::Line(w[0], w[1])).collect(),
+            Entity::Point { .. } => vec![],
             _ => vec![self.curve(e)],
         }
     }
@@ -157,6 +158,8 @@ impl Sketch {
                 Curve::Line(pts[0], pts[pts.len() - 1])
             }
             Entity::Line { a, b } => Curve::Line(self.point_pos(a), self.point_pos(b)),
+            // Degenerate; callers reject points before asking for a curve.
+            Entity::Point { p } => Curve::Line(self.point_pos(p), self.point_pos(p)),
             Entity::Circle { center, radius } => Curve::Circle(self.point_pos(center), self.param(radius)),
             Entity::Arc { center, start, end } => {
                 let c = self.point_pos(center);
@@ -254,6 +257,9 @@ impl Sketch {
         }
         if matches!(self.entity(e), Entity::Spline { .. }) {
             return self.trim_spline(e, at);
+        }
+        if matches!(self.entity(e), Entity::Point { .. }) {
+            return Err("points cannot be trimmed – delete them instead".into());
         }
         let curve = self.curve(e);
         let cuts = self.cuts(e);
@@ -589,6 +595,7 @@ impl Sketch {
                         Entity::Arc { center: c, start: s, end: en }
                     }
                 }
+                Entity::Point { p } => Entity::Point { p: get(self, p, &mut map) },
                 Entity::Spline { .. } => unreachable!("handled above"),
             };
             let new = self.push_entity_pub(e);
@@ -647,6 +654,9 @@ impl Sketch {
         }
         if distance <= 0.0 {
             return Err("distance must be positive".into());
+        }
+        if ids.iter().any(|e| matches!(self.entity(*e), Entity::Point { .. })) {
+            return Err("points cannot be offset".into());
         }
         if let [single] = ids {
             if let Some((c, r)) = self.curve(*single).circle() {

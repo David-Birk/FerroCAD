@@ -28,6 +28,8 @@ pub enum Entity {
     Arc { center: PointId, start: PointId, end: PointId },
     /// Smooth curve through its fit points (centripetal Catmull–Rom).
     Spline { points: Vec<PointId> },
+    /// A standalone sketch point (Fusion's Point tool), e.g. to place holes.
+    Point { p: PointId },
 }
 
 impl Entity {
@@ -37,6 +39,7 @@ impl Entity {
             Entity::Circle { center, .. } => vec![center],
             Entity::Arc { center, start, end } => vec![center, start, end],
             Entity::Spline { ref points } => points.clone(),
+            Entity::Point { p } => vec![p],
         }
     }
 }
@@ -182,11 +185,55 @@ impl Sketch {
         (0..self.points.len()).map(PointId)
     }
 
+    /// Points used by live entities (curve ends, centres, fit points and
+    /// standalone points), sorted. Points of deleted curves are left out.
+    pub fn used_points(&self) -> Vec<PointId> {
+        let mut pts: Vec<PointId> = self.entities().flat_map(|(_, e)| e.points()).collect();
+        pts.sort();
+        pts.dedup();
+        pts
+    }
+
     // -------------------------------------------------------------- entities
 
     fn push_entity(&mut self, entity: Entity) -> EntityId {
         self.entities.push(EntitySlot { entity, construction: false, alive: true });
         EntityId(self.entities.len() - 1)
+    }
+
+    /// Standalone sketch point.
+    pub fn add_point_entity(&mut self, pos: [f64; 2]) -> EntityId {
+        let p = self.add_point(pos);
+        self.push_entity(Entity::Point { p })
+    }
+
+    /// The live standalone-point entity at `p`, if `p` is one.
+    pub fn point_entity(&self, p: PointId) -> Option<EntityId> {
+        self.entities().find(|(_, e)| matches!(e, Entity::Point { p: q } if *q == p)).map(|(id, _)| id)
+    }
+
+    /// Closed polygon of lines sharing their corner points, all fixed – for
+    /// exploded text, which would only burden the solver otherwise. Points
+    /// closer than `1e-9` to their predecessor are dropped; fewer than three
+    /// distinct points give nothing.
+    pub fn add_fixed_polygon(&mut self, pts: &[[f64; 2]]) -> Vec<EntityId> {
+        let mut clean: Vec<[f64; 2]> = Vec::with_capacity(pts.len());
+        for &p in pts {
+            if clean.last().is_none_or(|q| dist(*q, p) > 1e-9) {
+                clean.push(p);
+            }
+        }
+        while clean.len() > 1 && dist(clean[0], clean[clean.len() - 1]) <= 1e-9 {
+            clean.pop();
+        }
+        if clean.len() < 3 {
+            return Vec::new();
+        }
+        let ids: Vec<PointId> = clean.iter().map(|p| self.add_point(*p)).collect();
+        for &p in &ids {
+            self.set_point_fixed(p, true);
+        }
+        (0..ids.len()).map(|i| self.add_line_between(ids[i], ids[(i + 1) % ids.len()])).collect()
     }
 
     pub fn add_line_between(&mut self, a: PointId, b: PointId) -> EntityId {
@@ -314,7 +361,7 @@ impl Sketch {
             Entity::Arc { center, start, .. } => {
                 Some(dist(self.point_pos(center), self.point_pos(start)))
             }
-            Entity::Line { .. } | Entity::Spline { .. } => None,
+            Entity::Line { .. } | Entity::Spline { .. } | Entity::Point { .. } => None,
         }
     }
 
@@ -380,7 +427,7 @@ impl Sketch {
                 let c = self.pt(p, center);
                 Some((c, dist(c, self.pt(p, start))))
             }
-            Entity::Line { .. } | Entity::Spline { .. } => None,
+            Entity::Line { .. } | Entity::Spline { .. } | Entity::Point { .. } => None,
         }
     }
 }

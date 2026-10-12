@@ -1,7 +1,7 @@
 //! Regions formed by crossing and branching curves.
 
 use ferrocad_sketch::profile::profile_at;
-use ferrocad_sketch::{find_profiles, Profile, Sketch};
+use ferrocad_sketch::{find_profiles, Constraint, Profile, Sketch};
 use std::f64::consts::PI;
 
 fn areas(profiles: &[Profile]) -> Vec<f64> {
@@ -180,4 +180,41 @@ fn spline_points_drag_and_survive_data_roundtrip() {
     assert!(pts.iter().any(|p| (p[1] - 8.0).abs() < 1e-9));
     let back = Sketch::from_data(sk.to_data()).unwrap();
     assert_eq!(back.to_data(), sk.to_data());
+}
+
+/// Exploded text: closed polygons of fixed points. A contour inside another
+/// becomes a hole (and a profile of its own, like in Fusion), and the fixed
+/// glyph points add no unknowns to the solver.
+#[test]
+fn fixed_polygons_nest_and_cost_the_solver_nothing() {
+    let mut sk = Sketch::new();
+    let square = |x: f64, s: f64| vec![[x, x], [x + s, x], [x + s, x + s], [x, x + s], [x, x]];
+    let outer = sk.add_fixed_polygon(&square(0.0, 10.0));
+    assert_eq!(outer.len(), 4, "closing duplicate dropped");
+    // Inner contour clockwise (TrueType style) – orientation must not matter.
+    let mut inner = square(3.0, 4.0);
+    inner.reverse();
+    sk.add_fixed_polygon(&inner);
+    assert!(sk.add_fixed_polygon(&[[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]]).is_empty());
+    let p = find_profiles(&sk);
+    assert_eq!(p.len(), 2);
+    let ring = profile_at(&p, [1.0, 1.0]).unwrap();
+    assert_eq!(p[ring].holes.len(), 1);
+    assert!(close(p[ring].area(), 100.0 - 16.0));
+
+    // Hundreds of fixed glyph-like polygons: zero free parameters.
+    for k in 0..150 {
+        let x = 20.0 + 3.0 * k as f64;
+        sk.add_fixed_polygon(&[[x, 0.0], [x + 1.0, 0.0], [x + 1.0, 1.0], [x + 0.5, 1.5], [x, 1.0]]);
+    }
+    let free = sk.add_line([0.0, -5.0], [10.0, -5.0]);
+    sk.constrain(Constraint::Horizontal(free));
+    let t = std::time::Instant::now();
+    let a = sk.analyze();
+    sk.solve().unwrap();
+    assert_eq!(a.dof, 3);
+    assert!(t.elapsed().as_millis() < 200, "solve + analyze took {:?}", t.elapsed());
+    let t = std::time::Instant::now();
+    assert_eq!(find_profiles(&sk).len(), 152);
+    assert!(t.elapsed().as_millis() < 500, "regions took {:?}", t.elapsed());
 }

@@ -1222,11 +1222,13 @@ dependencies = [
  "eframe",
  "egui",
  "egui_kittest",
+ "epaint_default_fonts",
  "ferrocad-kernel-occt",
  "ferrocad-model",
  "ferrocad-sketch",
  "ferrocad-view",
  "rfd",
+ "ttf-parser",
 ]
 
 [[package]]

@@ -62,6 +62,7 @@ impl Sketch {
                 Entity::Circle { center, radius } => point_ok(center) && radius.0 < np,
                 Entity::Arc { center, start, end } => point_ok(center) && point_ok(start) && point_ok(end),
                 Entity::Spline { ref points } => points.len() >= 2 && points.iter().all(|p| point_ok(*p)),
+                Entity::Point { p } => point_ok(p),
             };
             if !ok {
                 return Err("entity refers to a missing point".into());

@@ -11,6 +11,7 @@ mod picking;
 mod render3d;
 mod ribbon;
 mod sketch_ui;
+mod text;
 mod theme;
 mod timeline;
 mod viewport;
