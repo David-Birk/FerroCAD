@@ -303,7 +303,6 @@ impl FerroApp {
             .unwrap_or(100.0);
         let section = self.section.map(|s| s.plane());
         let color = BODY_COLOR.map(|c| c as f32 / 255.0);
-        let uniforms = crate::render3d::uniforms(&self.camera, vp, color, section, radius);
         let rect = egui::Rect::from_min_size(
             egui::pos2(vp.x as f32, vp.y as f32),
             egui::vec2(vp.width as f32, vp.height as f32),
@@ -313,7 +312,15 @@ impl FerroApp {
         }
         painter.add(eframe::egui_wgpu::Callback::new_paint_callback(
             rect,
-            crate::render3d::SceneCallback { data: data.clone(), uniforms, overlay: self.overlay.clone() },
+            crate::render3d::SceneCallback {
+                data: data.clone(),
+                camera: self.camera,
+                viewport: *vp,
+                color,
+                section,
+                radius,
+                overlay: self.overlay.clone(),
+            },
         ));
         // Outline of the cut.
         if let Some((o, n)) = section {
@@ -356,7 +363,8 @@ impl FerroApp {
         for o in OriginPlane::ALL {
             let fill = theme::ORANGE.gamma_multiply(0.16);
             self.draw_plane(painter, vp, &o.plane(), false, fill, Stroke::new(1.0, theme::ORANGE));
-            if let Some(c) = self.to_screen(o.plane().to_world([1.0, 1.0].map(|v| v * self.camera.distance * 0.3)), vp) {
+            let at = crate::features_ui::plane_size(self.camera.distance) * 0.85;
+            if let Some(c) = self.to_screen(o.plane().to_world([at, at]), vp) {
                 painter.text(c, egui::Align2::CENTER_CENTER, o.label(), egui::FontId::proportional(12.0), theme::ORANGE);
             }
         }

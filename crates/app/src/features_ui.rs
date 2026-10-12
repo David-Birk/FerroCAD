@@ -745,8 +745,8 @@ impl FeatureSession {
 }
 
 /// Size of drawn construction planes.
-fn plane_size(cam_distance: f64) -> f64 {
-    cam_distance * 0.35
+pub fn plane_size(cam_distance: f64) -> f64 {
+    cam_distance * 0.2
 }
 
 impl FerroApp {
@@ -773,8 +773,8 @@ impl FerroApp {
         let Some(q) = self.plane_quad(plane, centred, vp) else { return };
         if self.gpu {
             let c = self.plane_corners(plane, centred);
-            crate::render3d::push_triangle(&self.overlay, [c[0], c[1], c[2]], fill);
-            crate::render3d::push_triangle(&self.overlay, [c[0], c[2], c[3]], fill);
+            crate::render3d::push_triangle(&self.overlay, [c[0], c[1], c[2]], fill, false);
+            crate::render3d::push_triangle(&self.overlay, [c[0], c[2], c[3]], fill, false);
             painter.add(egui::Shape::closed_line(q, stroke));
         } else {
             painter.add(egui::Shape::convex_polygon(q, fill, stroke));
@@ -900,7 +900,7 @@ impl FerroApp {
                     if self.gpu {
                         for tri in tris {
                             let p = [0, 1, 2].map(|k| mesh.positions[mesh.indices[tri * 3 + k] as usize]);
-                            crate::render3d::push_triangle(&self.overlay, p, color.gamma_multiply(0.55));
+                            crate::render3d::push_triangle(&self.overlay, p, color.gamma_multiply(0.55), true);
                         }
                         return;
                     }

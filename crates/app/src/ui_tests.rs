@@ -1432,3 +1432,30 @@ fn active_sketch_tool_follows_the_cursor() {
     assert_eq!(s.tool, Tool::Select);
     assert_eq!(s.tool.icon(), None, "no badge for Select");
 }
+
+/// Section analysis cuts bodies and face highlights, but not the origin and
+/// construction planes: their fill triangles go to the GPU marked "not cut".
+#[test]
+fn section_view_does_not_cut_planes() {
+    let mut h = harness();
+    box_model(&mut h);
+    // The GPU path collects translucent fills in the overlay (the headless
+    // harness runs the UI but not the paint callback).
+    h.state_mut().gpu = true;
+    h.state_mut().section = Some(crate::inspect::Section { axis: 1, offset: 3.0, flip: false });
+    run(&mut h, Command::CreateSketch);
+    h.run_steps(2);
+    let flags = |h: &Harness<'static, FerroApp>| -> Vec<f32> {
+        let v = h.state().overlay.lock().unwrap().clone();
+        v.as_chunks::<8>().0.iter().map(|c| c[7]).collect()
+    };
+    let planes = flags(&h);
+    assert!(planes.len() >= 18, "three origin planes: {}", planes.len());
+    assert!(planes.iter().all(|f| *f == 0.0), "planes must not be cut by the section");
+    press(&mut h, Key::Escape);
+    // A selected face highlight is cut with its body.
+    h.state_mut().selection = vec![Pick::Face(FaceRef { point: [15.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0] })];
+    h.run_steps(2);
+    let face = flags(&h);
+    assert!(!face.is_empty() && face.iter().all(|f| *f == 1.0), "{face:?}");
+}

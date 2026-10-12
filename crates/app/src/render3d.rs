@@ -83,11 +83,13 @@ fn fs_main(i: VOut) -> @location(0) vec4<f32> {
 struct OIn {
     @location(0) pos: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) cuttable: f32,
 };
 struct OOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) cuttable: f32,
 };
 
 @vertex
@@ -96,12 +98,14 @@ fn vs_overlay(v: OIn) -> OOut {
     o.clip = u.view_proj * vec4<f32>(v.pos, 1.0);
     o.world = v.pos;
     o.color = v.color;
+    o.cuttable = v.cuttable;
     return o;
 }
 
+/// Face highlights are cut with the bodies; planes are not.
 @fragment
 fn fs_overlay(i: OOut) -> @location(0) vec4<f32> {
-    if (cut(i.world)) { discard; }
+    if (i.cuttable > 0.5 && cut(i.world)) { discard; }
     return i.color;
 }
 
@@ -165,11 +169,18 @@ impl SceneData {
 /// filled during the frame: position (3) + premultiplied colour (4).
 pub type Overlay = std::sync::Arc<std::sync::Mutex<Vec<f32>>>;
 
-pub fn push_triangle(overlay: &Overlay, pts: [Vec3; 3], color: egui::Color32) {
+/// Floats per overlay vertex: position, colour, "cut by the section view".
+const OVERLAY_FLOATS: usize = 8;
+
+/// A translucent triangle drawn depth-tested with the bodies. `cuttable`
+/// triangles (face highlights) disappear with the section-cut part of the
+/// bodies; planes stay whole, like in Fusion.
+pub fn push_triangle(overlay: &Overlay, pts: [Vec3; 3], color: egui::Color32, cuttable: bool) {
     let c = color.to_normalized_gamma_f32();
+    let cut = if cuttable { 1.0 } else { 0.0 };
     if let Ok(mut v) = overlay.lock() {
         for p in pts {
-            v.extend([p[0] as f32, p[1] as f32, p[2] as f32, c[0], c[1], c[2], c[3]]);
+            v.extend([p[0] as f32, p[1] as f32, p[2] as f32, c[0], c[1], c[2], c[3], cut]);
         }
     }
 }
@@ -260,7 +271,7 @@ pub fn init(cc: &eframe::CreationContext<'_>) -> bool {
     let tri_pipeline = pipeline(wgpu::PrimitiveTopology::TriangleList, "vs_body", &body_buffers, "fs_main", face_bias);
     let line_pipeline =
         pipeline(wgpu::PrimitiveTopology::LineList, "vs_main", &buffers, "fs_line", Default::default());
-    let overlay_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
+    let overlay_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32];
     let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("ferrocad overlay"),
         layout: Some(&layout),
@@ -269,7 +280,7 @@ pub fn init(cc: &eframe::CreationContext<'_>) -> bool {
             entry_point: Some("vs_overlay"),
             compilation_options: Default::default(),
             buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: 28,
+                array_stride: (OVERLAY_FLOATS * 4) as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &overlay_attributes,
             })],
@@ -348,8 +359,27 @@ pub fn view_proj(cam: &Camera, vp: &Viewport, near: f64, far: f64) -> [f32; 16] 
 
 pub struct SceneCallback {
     pub data: Arc<SceneData>,
-    pub uniforms: [f32; 32],
+    pub camera: Camera,
+    pub viewport: Viewport,
+    pub color: [f32; 3],
+    pub section: Option<(Vec3, Vec3)>,
+    /// Radius around the camera target that holds every body.
+    pub radius: f64,
     pub overlay: Overlay,
+}
+
+/// Distance from `target` to the farthest overlay vertex (planes, face
+/// highlights), so the depth range covers them as well as the bodies.
+fn overlay_radius(overlay: &[f32], target: Vec3) -> f64 {
+    overlay
+        .as_chunks::<OVERLAY_FLOATS>()
+        .0
+        .iter()
+        .map(|v| {
+            let d = [v[0] as f64 - target[0], v[1] as f64 - target[1], v[2] as f64 - target[2]];
+            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+        })
+        .fold(0.0, f64::max)
 }
 
 impl egui_wgpu::CallbackTrait for SceneCallback {
@@ -362,14 +392,18 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(gpu) = resources.get_mut::<Gpu>() else { return Vec::new() };
-        queue.write_buffer(&gpu.uniforms, 0, bytemuck::cast_slice(&self.uniforms));
+        // The overlay is complete only now (it is filled after the callback is
+        // queued), so the near/far range is decided here.
+        let extra = self.overlay.lock().map(|v| overlay_radius(&v, self.camera.target)).unwrap_or(0.0);
+        let u = uniforms(&self.camera, &self.viewport, self.color, self.section, self.radius.max(extra));
+        queue.write_buffer(&gpu.uniforms, 0, bytemuck::cast_slice(&u));
         gpu.overlay = self.overlay.lock().ok().filter(|v| !v.is_empty()).map(|v| {
             let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("ferrocad overlay"),
                 contents: bytemuck::cast_slice(&v),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-            (buf, (v.len() / 7) as u32)
+            (buf, (v.len() / OVERLAY_FLOATS) as u32)
         });
         if gpu.scene_id != self.data.id {
             let upload = |data: &[f32], label, floats_per_vertex: usize| {
@@ -415,10 +449,16 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
     }
 }
 
-/// Uniforms for one frame.
-pub fn uniforms(cam: &Camera, vp: &Viewport, color: [f32; 3], section: Option<(Vec3, Vec3)>, radius: f64) -> [f32; 32] {
+/// Near and far clip distances for everything within `radius` of the target.
+fn depth_range(cam: &Camera, radius: f64) -> (f64, f64) {
     let near = (cam.distance - radius).max(cam.distance * 0.001).max(1e-3) * 0.5;
     let far = cam.distance + radius * 2.0 + 10.0;
+    (near, far)
+}
+
+/// Uniforms for one frame.
+pub fn uniforms(cam: &Camera, vp: &Viewport, color: [f32; 3], section: Option<(Vec3, Vec3)>, radius: f64) -> [f32; 32] {
+    let (near, far) = depth_range(cam, radius);
     let mut u = [0.0f32; 32];
     u[..16].copy_from_slice(&view_proj(cam, vp, near, far));
     let eye = cam.eye();
@@ -434,6 +474,35 @@ pub fn uniforms(cam: &Camera, vp: &Viewport, color: [f32; 3], section: Option<(V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Origin planes reach far beyond a small part; their fills must not be
+    /// clipped by a depth range sized for the part alone.
+    #[test]
+    fn depth_range_covers_overlay_planes() {
+        let mut cam = Camera::default();
+        cam.set_view(ferrocad_view::ViewPreset::Home);
+        cam.target = [40.0, 30.0, 2.0];
+        cam.distance = 25.0;
+        let vp = Viewport { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let s = cam.distance * 4.0;
+        let mut overlay = Vec::new();
+        for c in [[0.0, 0.0, 0.0], [s, 0.0, 0.0], [s, s, 0.0], [0.0, s, 0.0], [0.0, 0.0, s], [0.0, s, s]] {
+            overlay.extend([c[0] as f32, c[1] as f32, c[2] as f32, 1.0, 0.5, 0.0, 0.2, 0.0]);
+        }
+        let part_radius: f64 = 3.0;
+        let radius = part_radius.max(overlay_radius(&overlay, cam.target));
+        let (near, far) = depth_range(&cam, radius);
+        for v in overlay.as_chunks::<OVERLAY_FLOATS>().0 {
+            if let Some(p) = cam.project([v[0] as f64, v[1] as f64, v[2] as f64], &vp) {
+                assert!(p[2] > near && p[2] < far, "depth {} outside {near}..{far}", p[2]);
+            }
+        }
+        // The part alone would have clipped them.
+        let (_, far_part) = depth_range(&cam, part_radius);
+        assert!(overlay.as_chunks::<OVERLAY_FLOATS>().0.iter().any(|v| cam
+            .project([v[0] as f64, v[1] as f64, v[2] as f64], &vp)
+            .is_some_and(|p| p[2] > far_part)));
+    }
 
     #[test]
     fn matrix_matches_camera_projection() {
