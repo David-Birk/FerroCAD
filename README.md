@@ -91,7 +91,8 @@ navigation bar · timeline · status bar with hints for the active tool.
 - **Timeline:** double-click = edit, right-click = suppress / roll back / move / delete; drag the
   orange marker to roll back.
 - **File:** New, Open…, Save (Ctrl+S), Save As…, **STEP import** (one body per solid, as a feature in
-  the timeline), STEP and STL export – with native file dialogs (XDG portal).
+  the timeline), STEP, STL and **3MF** export (3MF: every visible body with its colour, watertight, for
+  PrusaSlicer/OrcaSlicer & co.) – with native file dialogs (XDG portal).
 - **Undo/Redo:** Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y – including single sketch steps.
 
 ## Building (Arch Linux)

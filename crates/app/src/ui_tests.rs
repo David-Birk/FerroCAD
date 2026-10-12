@@ -1628,3 +1628,36 @@ fn thread_on_a_shaft_and_tapped_hole() {
     h.state_mut().edit_feature(id);
     assert!(matches!(&h.state().mode, Mode::Feature(f) if f.thread == 5));
 }
+
+#[test]
+fn export_3mf_with_all_bodies() {
+    let mut h = harness();
+    box_model(&mut h);
+    // A second body: copy the box 40 mm along X.
+    h.state_mut().selection = vec![Pick::Body("Body1".into())];
+    run(&mut h, Command::Feature(FeatureType::Move));
+    if let Mode::Feature(f) = &mut h.state_mut().mode {
+        f.exprs[0].text = "40 mm".into();
+        f.flags[0].1 = true; // copy
+    }
+    h.run_steps(2);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    assert_eq!(h.state().bodies.len(), 2);
+    let path = std::env::temp_dir().join(format!("ferrocad_export_{}.3mf", std::process::id()));
+    h.state_mut().export_path = path.display().to_string();
+    h.state_mut().export(crate::app::ExportFormat::ThreeMf);
+    assert!(h.state().message.as_ref().is_some_and(|(m, err)| !err && m.starts_with("exported")), "{:?}", h.state().message);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[..2], b"PK");
+    let text = String::from_utf8_lossy(&bytes);
+    assert_eq!(text.matches("<object ").count(), 2);
+    assert!(text.contains("name=\"Body1\"") && text.contains("name=\"Body2\""));
+    // The box is welded into a closed mesh: 8 corners, 12 triangles.
+    let first = &text[text.find("<object ").unwrap()..text.find("</object>").unwrap()];
+    assert_eq!(first.matches("<vertex ").count(), 8);
+    assert_eq!(first.matches("<triangle ").count(), 12);
+    if std::env::var("KEEP_3MF").is_err() {
+        let _ = std::fs::remove_file(&path);
+    }
+}

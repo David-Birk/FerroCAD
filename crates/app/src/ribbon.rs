@@ -2,7 +2,7 @@
 //! ribbon: a workspace tab plus groups of large tool buttons, each group with
 //! a dropdown that lists its commands.
 
-use crate::app::{Command, FerroApp, Mode};
+use crate::app::{Command, ExportFormat, FerroApp, Mode};
 use crate::features_ui::FeatureType as F;
 use crate::icons::{self, Icon};
 use crate::sketch_ui::{ConstraintKind, SketchCommand, Tool};
@@ -241,13 +241,16 @@ impl FerroApp {
             ui.close();
             self.run(Command::ImportStep);
         }
-        if item(ui, "Export STEP…", "") {
-            ui.close();
-            self.export_with_dialog(false);
-        }
-        if item(ui, "Export STL…", "") {
-            ui.close();
-            self.export_with_dialog(true);
+        for format in [ExportFormat::Step, ExportFormat::Stl, ExportFormat::ThreeMf] {
+            let label = match format {
+                ExportFormat::Step => "Export STEP…",
+                ExportFormat::Stl => "Export STL…",
+                ExportFormat::ThreeMf => "Export 3MF (for slicers)…",
+            };
+            if item(ui, label, "") {
+                ui.close();
+                self.export_with_dialog(format);
+            }
         }
         ui.separator();
         ui.collapsing("Paths (if no file dialog is available)", |ui| {
@@ -266,13 +269,11 @@ impl FerroApp {
             ui.label("Export");
             ui.add(egui::TextEdit::singleline(&mut self.export_path).desired_width(220.0));
             ui.horizontal(|ui| {
-                if ui.button("STEP").clicked() {
-                    self.export(false);
-                    ui.close();
-                }
-                if ui.button("STL").clicked() {
-                    self.export(true);
-                    ui.close();
+                for format in [ExportFormat::Step, ExportFormat::Stl, ExportFormat::ThreeMf] {
+                    if ui.button(format.extension().to_uppercase()).clicked() {
+                        self.export(format);
+                        ui.close();
+                    }
                 }
             });
         });

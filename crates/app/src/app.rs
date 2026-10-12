@@ -18,6 +18,32 @@ use std::collections::HashSet;
 
 pub type Solid = <OcctKernel as Kernel>::Solid;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportFormat {
+    Step,
+    Stl,
+    /// 3D Manufacturing Format: all bodies with their colours, for slicers.
+    ThreeMf,
+}
+
+impl ExportFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportFormat::Step => "STEP",
+            ExportFormat::Stl => "STL mesh",
+            ExportFormat::ThreeMf => "3MF (slicers)",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Step => "step",
+            ExportFormat::Stl => "stl",
+            ExportFormat::ThreeMf => "3mf",
+        }
+    }
+}
+
 /// Display data derived from a body after each rebuild.
 pub struct BodyDisplay {
     pub name: String,
@@ -590,8 +616,8 @@ impl FerroApp {
         }
     }
 
-    pub fn export_with_dialog(&mut self, stl: bool) {
-        let (name, ext) = if stl { ("STL mesh", "stl") } else { ("STEP", "step") };
+    pub fn export_with_dialog(&mut self, format: ExportFormat) {
+        let (name, ext) = (format.label(), format.extension());
         let stem = std::path::Path::new(&self.doc_path).file_stem().map(|s| s.to_string_lossy().into_owned());
         let path = rfd::FileDialog::new()
             .add_filter(name, &[ext])
@@ -599,7 +625,7 @@ impl FerroApp {
             .save_file();
         if let Some(path) = path {
             self.export_path = path.display().to_string();
-            self.export(stl);
+            self.export(format);
         }
     }
 
@@ -671,26 +697,43 @@ impl FerroApp {
         self.save_document();
     }
 
-    pub fn export(&mut self, stl: bool) {
-        let path = std::path::PathBuf::from(&self.export_path);
-        let visible: Vec<Solid> = self
+    /// Export the visible bodies to `export_path`.
+    pub fn export(&mut self, format: ExportFormat) {
+        let path = std::path::PathBuf::from(&self.export_path).with_extension(format.extension());
+        let visible: Vec<(String, Solid)> = self
             .model
             .bodies
             .iter()
             .zip(&self.bodies)
             .filter(|(_, d)| d.visible)
-            .map(|(b, _)| b.solid.clone())
+            .map(|(b, _)| (b.name.clone(), b.solid.clone()))
             .collect();
         if visible.is_empty() {
             self.error("nothing to export");
             return;
         }
-        let result = if stl {
-            self.kernel.export_stl(&visible[0], &path.with_extension("stl"))
-        } else {
-            self.kernel.export_step(&visible, &path.with_extension("step"))
+        let solids: Vec<Solid> = visible.iter().map(|(_, s)| s.clone()).collect();
+        let result = match format {
+            ExportFormat::Stl => self.kernel.export_stl(&solids[0], &path),
+            ExportFormat::Step => self.kernel.export_step(&solids, &path),
+            ExportFormat::ThreeMf => {
+                // Finer than the display mesh: this is what gets printed.
+                let meshes: Result<Vec<_>, _> = solids.iter().map(|s| self.kernel.tessellate(s, 0.01)).collect();
+                meshes.and_then(|meshes| {
+                    let objects: Vec<ferrocad_view::threemf::Object> = visible
+                        .iter()
+                        .zip(&meshes)
+                        .map(|((name, _), mesh)| ferrocad_view::threemf::Object { name, mesh, color: self.body_color(name) })
+                        .collect();
+                    std::fs::write(&path, ferrocad_view::threemf::write(&objects))
+                        .map_err(|e| ferrocad_model::KernelError(e.to_string()))
+                })
+            }
         };
         match result {
+            Ok(()) if format == ExportFormat::Stl && visible.len() > 1 => {
+                self.info(format!("exported {} (STL holds one body: {}; use 3MF for all)", path.display(), visible[0].0))
+            }
             Ok(()) => self.info(format!("exported {}", path.display())),
             Err(e) => self.error(format!("export failed: {e}")),
         }

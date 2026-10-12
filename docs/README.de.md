@@ -98,7 +98,8 @@ aktiven Werkzeug.
 - **Zeitleiste:** Doppelklick = bearbeiten, Rechtsklick = unterdrücken / zurückrollen / verschieben /
   löschen, orangen Marker ziehen zum Zurückrollen.
 - **Datei:** Neu, Öffnen…, Speichern (Ctrl+S), Speichern unter…, **STEP-Import** (ein Körper je Solid,
-  als Feature in der Zeitleiste), STEP- und STL-Export – mit nativen Dateidialogen (XDG-Portal).
+  als Feature in der Zeitleiste), STEP-, STL- und **3MF**-Export (3MF: alle sichtbaren Körper mit Farbe,
+  wasserdicht, für PrusaSlicer/OrcaSlicer & Co.) – mit nativen Dateidialogen (XDG-Portal).
 - **Rückgängig/Wiederholen:** Ctrl+Z, Ctrl+Shift+Z oder Ctrl+Y – auch einzelne Skizzenschritte.
 
 ## Bauen (Arch Linux)
