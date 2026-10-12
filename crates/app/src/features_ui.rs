@@ -744,16 +744,29 @@ impl FeatureSession {
     }
 }
 
-/// Size of drawn construction planes.
-pub fn plane_size(cam_distance: f64) -> f64 {
-    cam_distance * 0.2
+/// Size of drawn origin and construction planes for a model whose bodies
+/// lie within `bounds`: a fixed size in the model (like Fusion), so planes
+/// shrink on screen when you zoom out. Big enough to reach past the part.
+pub fn plane_size_for(bounds: Option<(Vec3, Vec3)>) -> f64 {
+    match bounds {
+        Some((min, max)) => {
+            let reach = min.iter().chain(max.iter()).fold(0.0f64, |m, v| m.max(v.abs()));
+            (reach * 1.2).max(20.0)
+        }
+        None => 50.0,
+    }
 }
 
 impl FerroApp {
+    /// Edge length of drawn planes (see `plane_size_for`).
+    pub fn plane_size(&self) -> f64 {
+        self.plane_extent
+    }
+
     /// Screen polygon of a plane: origin planes as a square in their positive
     /// quadrant, others centred on their origin.
     pub fn plane_quad(&self, plane: &Plane, centred: bool, vp: &Viewport) -> Option<Vec<Pos2>> {
-        let s = plane_size(self.camera.distance);
+        let s = self.plane_size();
         let (a, b) = if centred { (-s / 2.0, s / 2.0) } else { (0.0, s) };
         let pts: Vec<Pos2> =
             [[a, a], [b, a], [b, b], [a, b]].iter().filter_map(|uv| self.to_screen(plane.to_world(*uv), vp)).collect();
@@ -762,7 +775,7 @@ impl FerroApp {
 
     /// World corners of a drawn plane (see `plane_quad`).
     pub fn plane_corners(&self, plane: &Plane, centred: bool) -> [Vec3; 4] {
-        let s = plane_size(self.camera.distance);
+        let s = self.plane_size();
         let (a, b) = if centred { (-s / 2.0, s / 2.0) } else { (0.0, s) };
         [[a, a], [b, a], [b, b], [a, b]].map(|uv| plane.to_world(uv))
     }
@@ -861,7 +874,7 @@ impl FerroApp {
             SelKind::Plane => {
                 let (o, d) = self.camera.ray([pos.x as f64, pos.y as f64], vp);
                 let d = normalize(d);
-                let s = plane_size(self.camera.distance);
+                let s = self.plane_size();
                 let mut best: Option<(f64, Pick)> = None;
                 let mut consider = |plane: Plane, centred: bool, pick: Pick| {
                     let Some(hit) = plane.intersect_ray(o, d) else { return };

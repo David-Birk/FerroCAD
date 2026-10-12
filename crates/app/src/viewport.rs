@@ -363,7 +363,7 @@ impl FerroApp {
         for o in OriginPlane::ALL {
             let fill = theme::ORANGE.gamma_multiply(0.16);
             self.draw_plane(painter, vp, &o.plane(), false, fill, Stroke::new(1.0, theme::ORANGE));
-            let at = crate::features_ui::plane_size(self.camera.distance) * 0.85;
+            let at = self.plane_size() * 0.85;
             if let Some(c) = self.to_screen(o.plane().to_world([at, at]), vp) {
                 painter.text(c, egui::Align2::CENTER_CENTER, o.label(), egui::FontId::proportional(12.0), theme::ORANGE);
             }

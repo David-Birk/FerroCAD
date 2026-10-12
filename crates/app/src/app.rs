@@ -138,6 +138,8 @@ pub struct FerroApp {
     pub section: Option<Section>,
     /// Bodies are drawn with wgpu (depth buffer) instead of the painter.
     pub gpu: bool,
+    /// Edge length of drawn origin/construction planes, set on rebuild.
+    pub plane_extent: f64,
     /// Bumped on every rebuild; part of the GPU scene cache key.
     pub scene_rev: u64,
     pub scene_cache: Option<(String, std::sync::Arc<crate::render3d::SceneData>)>,
@@ -185,6 +187,7 @@ impl FerroApp {
             hidden_construction: HashSet::new(),
             section: None,
             gpu: false,
+            plane_extent: crate::features_ui::plane_size_for(None),
             scene_rev: 0,
             scene_cache: None,
             overlay: Default::default(),
@@ -236,6 +239,7 @@ impl FerroApp {
     pub fn rebuild(&mut self) {
         self.model = self.doc.rebuild(&self.kernel);
         self.bodies = self.display_bodies(&self.model, true);
+        self.plane_extent = crate::features_ui::plane_size_for(ferrocad_view::bounds(self.bodies.iter().map(|b| &b.mesh)));
         self.scene_rev += 1;
         self.model_param_edits.clear();
         self.interference.clear();

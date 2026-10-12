@@ -1459,3 +1459,23 @@ fn section_view_does_not_cut_planes() {
     let face = flags(&h);
     assert!(!face.is_empty() && face.iter().all(|f| *f == 1.0), "{face:?}");
 }
+
+#[test]
+fn planes_have_a_fixed_size_in_the_model() {
+    let mut h = harness();
+    assert_eq!(h.state().plane_size(), 50.0, "empty document");
+    box_model(&mut h);
+    // 30 × 20 × 10 box at the origin: planes reach a bit past it.
+    assert!((h.state().plane_size() - 36.0).abs() < 1e-9, "{}", h.state().plane_size());
+    let width = |h: &Harness<'static, FerroApp>| {
+        let vp = viewport(h.state());
+        let q = h.state().plane_quad(&OriginPlane::XY.plane(), false, &vp).unwrap();
+        let xs = q.iter().map(|p| p.x);
+        xs.clone().fold(f32::MIN, f32::max) - xs.fold(f32::MAX, f32::min)
+    };
+    let near = width(&h);
+    h.state_mut().camera.distance *= 2.0;
+    let far = width(&h);
+    assert!(far < near * 0.6, "zooming out shrinks the planes on screen: {near} → {far}");
+    assert!((h.state().plane_size() - 36.0).abs() < 1e-9, "the size itself doesn't follow the zoom");
+}
