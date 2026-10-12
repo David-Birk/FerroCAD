@@ -48,7 +48,9 @@ pub fn weld(mesh: &TriMesh) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         .collect();
     let tris = mesh
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]])
         .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
         .collect();
