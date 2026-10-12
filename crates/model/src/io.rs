@@ -69,6 +69,10 @@ pub fn save(doc: &Document) -> String {
             obj([
                 ("hidden_bodies", names_to_json(&doc.view.hidden_bodies)),
                 (
+                    "active_component",
+                    doc.view.active_component.as_deref().map(Json::from).unwrap_or(Json::Null),
+                ),
+                (
                     "appearances",
                     Json::Arr(
                         doc.view
@@ -139,6 +143,9 @@ fn feature_to_json(f: &Feature) -> Json {
         ("name".into(), f.name.as_str().into()),
         ("suppressed".into(), f.suppressed.into()),
     ];
+    if let Some(c) = &f.component {
+        fields.push(("in_component".into(), c.as_str().into()));
+    }
     let mut add = |k: &str, v: Json| fields.push((k.to_string(), v));
     match &f.kind {
         FeatureKind::Sketch(s) => {
@@ -315,6 +322,9 @@ fn feature_to_json(f: &Feature) -> Json {
             add("angle", j.angle.as_str().into());
             add("offset", j.offset.as_str().into());
             add("flip", j.flip.into());
+            if let Some((lo, hi)) = &j.limits {
+                add("limits", Json::Arr(vec![lo.as_str().into(), hi.as_str().into()]));
+            }
         }
         FeatureKind::Component(c) => {
             add("type", "component".into());
@@ -473,6 +483,9 @@ pub fn load(text: &str) -> R<Document> {
     if let Some(v) = root.get_opt("view") {
         if let Some(b) = v.get_opt("hidden_bodies") {
             view.hidden_bodies = names_from(b)?;
+        }
+        if let Some(c) = v.get_opt("active_component").filter(|c| !matches!(c, Json::Null)) {
+            view.active_component = Some(c.as_str()?.to_string());
         }
         if let Some(a) = v.get_opt("appearances") {
             for e in a.as_arr()? {
@@ -695,11 +708,19 @@ fn feature_from_json(f: &Json) -> R<Feature> {
                 angle: str_of(f, "angle")?,
                 offset: str_of(f, "offset")?,
                 flip: f.get("flip")?.as_bool()?,
+                limits: match f.get_opt("limits") {
+                    None => None,
+                    Some(l) => match l.as_arr()? {
+                        [lo, hi] => Some((lo.as_str()?.to_string(), hi.as_str()?.to_string())),
+                        _ => return Err(LoadError("joint limits need [min, max]".into())),
+                    },
+                },
             })
         }
         other => return Err(LoadError(format!("unknown feature type '{other}'"))),
     };
-    Ok(Feature { id, name, suppressed, kind })
+    let component = f.get_opt("in_component").map(|c| c.as_str().map(str::to_string)).transpose()?;
+    Ok(Feature { id, name, suppressed, kind, component })
 }
 
 fn str_of(f: &Json, key: &str) -> R<String> {

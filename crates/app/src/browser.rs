@@ -21,6 +21,7 @@ enum Action {
     Appearance(String, String),
     AppearanceAll(Vec<String>, String),
     SetVisible(Vec<String>, bool),
+    Activate(Option<String>),
 }
 
 /// One tree row: optional eye toggle, icon, label. Returns the label response.
@@ -90,10 +91,14 @@ impl FerroApp {
                     for (name, members) in &components {
                         let visible = self.bodies.iter().any(|b| members.contains(&b.name) && b.visible);
                         let selected = self.selection.contains(&Pick::Body(name.clone()));
+                        let active = self.doc.view.active_component.as_deref() == Some(name.as_str());
+                        let shown = if active { format!("{name}  ● active") } else { name.clone() };
                         let text = if selected {
-                            RichText::new(name.as_str()).color(crate::sketch_ui::COL_SELECTED)
+                            RichText::new(shown).color(crate::sketch_ui::COL_SELECTED)
+                        } else if active {
+                            RichText::new(shown).strong().color(theme::ACCENT)
                         } else {
-                            RichText::new(name.as_str()).strong()
+                            RichText::new(shown).strong()
                         };
                         let (eye, label) = row(ui, Some(visible), Icon::Body, text);
                         if eye.is_some_and(|r| r.clicked()) {
@@ -105,6 +110,16 @@ impl FerroApp {
                             action = Some(Action::SelectBody(name.clone(), additive));
                         }
                         label.context_menu(|ui| {
+                            if active {
+                                if ui.button("Activate Root").on_hover_text("New bodies go to the root again").clicked() {
+                                    action = Some(Action::Activate(None));
+                                    ui.close();
+                                }
+                            } else if ui.button("Activate").on_hover_text("New bodies go into this component").clicked() {
+                                action = Some(Action::Activate(Some(name.clone())));
+                                ui.close();
+                            }
+                            ui.separator();
                             for (cmd, text) in [
                                 (Command::Feature(FeatureType::Joint), "Joint"),
                                 (Command::Feature(FeatureType::Move), "Move/Copy"),
@@ -328,6 +343,13 @@ impl FerroApp {
             Some(Action::Run(cmd)) => self.run(cmd),
             Some(Action::Appearance(body, material)) => self.set_appearance(&body, Some(&material)),
             Some(Action::AppearanceAll(bodies, material)) => self.set_appearances(&bodies, Some(&material)),
+            Some(Action::Activate(c)) => {
+                match &c {
+                    Some(name) => self.info(format!("{name} is active – new bodies go into it")),
+                    None => self.info("root is active"),
+                }
+                self.doc.view.active_component = c;
+            }
             Some(Action::SetVisible(bodies, visible)) => {
                 for b in self.bodies.iter_mut().filter(|b| bodies.contains(&b.name)) {
                     b.visible = visible;

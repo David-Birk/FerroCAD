@@ -474,6 +474,7 @@ mod joint_tests {
                 angle: "0".into(),
                 offset: "0".into(),
                 flip: false,
+                limits: None,
             }),
         );
         let m = doc.rebuild(&k);

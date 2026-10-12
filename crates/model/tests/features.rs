@@ -396,13 +396,14 @@ fn joint_mates_faces_and_turns() {
             angle: "30".into(),
             offset: "0".into(),
             flip: false,
+            limits: Some(("0".into(), "20".into())),
         }),
     );
     let m = doc.rebuild(&Mock);
     assert!(m.errors().next().is_none(), "{:?}", m.errors().collect::<Vec<_>>());
     let d = &body_descs(&m)[1];
     // Normals already opposed: no alignment turn, a move, then the joint angle.
-    assert!(d.starts_with("Body2: rot30(move[-105.0, 0.0, 5.0]("), "{d}");
+    assert!(d.starts_with("Body2: rot20(move[-105.0, 0.0, 5.0]("), "clamped to the limit: {d}");
     let back = io::load(&io::save(&doc)).unwrap();
     assert_eq!(io::save(&back), io::save(&doc));
     // The angle is a model parameter.
@@ -452,4 +453,38 @@ fn components_group_bodies_for_joints_and_moves() {
     assert!(doc.rebuild(&Mock).errors().next().is_some());
     let back = io::load(&io::save(&doc)).unwrap();
     assert_eq!(io::save(&back), io::save(&doc));
+}
+
+#[test]
+fn bodies_made_while_a_component_is_active_belong_to_it() {
+    let (mut doc, sketch, _) = plate_document();
+    doc.view.active_component = Some("Lid".into());
+    doc.add(
+        "Extrude2",
+        FeatureKind::Extrude(ExtrudeFeature {
+            sketch,
+            profile_point: [1.0, 1.0],
+            distance: "3".into(),
+            symmetric: false,
+            operation: Operation::NewBody,
+        }),
+    );
+    doc.view.active_component = None;
+    doc.add(
+        "Copy",
+        FeatureKind::Move(MoveFeature {
+            bodies: vec!["Lid".into()],
+            translate: ["0".into(), "0".into(), "20".into()],
+            axis: None,
+            angle: "0".into(),
+            copy: true,
+        }),
+    );
+    let m = doc.rebuild(&Mock);
+    assert!(m.errors().next().is_none(), "{:?}", m.errors().collect::<Vec<_>>());
+    assert_eq!(m.components, vec![("Lid".to_string(), vec!["Body2".to_string()])]);
+    assert_eq!(m.component_of("Body3"), None, "made after deactivating");
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
+    assert_eq!(back.features()[2].component.as_deref(), Some("Lid"));
 }

@@ -96,6 +96,8 @@ pub struct ViewState {
     pub hidden_bodies: Vec<String>,
     /// Appearance (material name) per body name.
     pub appearances: Vec<(String, String)>,
+    /// Component new features go into (Fusion's "Activate").
+    pub active_component: Option<String>,
     /// Hidden sketches and construction geometry.
     pub hidden_features: Vec<FeatureId>,
 }
@@ -146,7 +148,8 @@ impl Document {
     pub fn add(&mut self, name: impl Into<String>, kind: FeatureKind) -> FeatureId {
         self.next_id += 1;
         let id = FeatureId(self.next_id);
-        let feature = Feature { id, name: name.into(), suppressed: false, kind };
+        let component = self.view.active_component.clone();
+        let feature = Feature { id, name: name.into(), suppressed: false, kind, component };
         self.features.insert(self.marker, feature);
         self.marker += 1;
         id
@@ -214,6 +217,21 @@ impl Document {
                     Err(e) => FeatureStatus::Error(e),
                 }
             };
+            // Bodies made while a component was active belong to it.
+            if let Some(comp) = self.features[i].component.clone() {
+                let new: Vec<String> = model
+                    .bodies
+                    .iter()
+                    .filter(|b| b.created_by == id && model.component_of(&b.name).is_none())
+                    .map(|b| b.name.clone())
+                    .collect();
+                if !new.is_empty() {
+                    match model.components.iter_mut().find(|(c, _)| *c == comp) {
+                        Some((_, list)) => list.extend(new),
+                        None => model.components.push((comp, new)),
+                    }
+                }
+            }
             model.status.insert(id, status);
             // Removed bodies leave their component; empty components vanish.
             let alive: Vec<String> = model.bodies.iter().map(|b| b.name.clone()).collect();
@@ -650,8 +668,14 @@ impl Document {
                 let j = j.clone();
                 let (p1, z1) = joint_frame(k, model, &j.from)?;
                 let (p2, z2) = joint_frame(k, model, &j.to)?;
-                let angle = eval(&j.angle)?.to_radians();
-                let offset = eval(&j.offset)?;
+                let mut angle = eval(&j.angle)?;
+                let mut offset = eval(&j.offset)?;
+                match j.kind {
+                    JointKind::Revolute => angle = j.clamp(angle, &eval)?,
+                    JointKind::Slider => offset = j.clamp(offset, &eval)?,
+                    JointKind::Rigid => {}
+                }
+                let angle = angle.to_radians();
                 let target = if j.flip { z2 } else { scale(z2, -1.0) };
                 // 1. turn the moving part so its z points at `target`, about p1
                 let mut steps: Vec<Transform> = Vec::new();

@@ -127,6 +127,11 @@ Dependency direction: `sketch` ← `model` ← `view`, and `kernel-occt` ← `ap
 - **Components** (`ComponentFeature`, `Model::components`): named groups of bodies. Body lists in
   mirror/pattern/move/joint/remove accept component names (`document::expand`). In the UI a component
   pick is `Pick::Body(component name)`; `SelKind::Body` picks components, `SelKind::SingleBody` doesn't.
+  Activation: `Document::view.active_component`; `Document::add` stamps it on the new feature
+  (`Feature::component`, saved as `in_component`) and the rebuild puts bodies that feature creates
+  into that component.
+- **Joint limits** (`JointFeature::limits`, min/max of angle or offset) clamp the motion; animation
+  swings between them.
   Joint animation rewrites the expression every frame without undo steps and restores it on stop.
 - **STEP import** is a timeline feature (`ImportFeature`, path stored) giving one body per solid; the
   file is re-read on rebuild.
@@ -154,7 +159,7 @@ Dependency direction: `sketch` ← `model` ← `view`, and `kernel-occt` ← `ap
    highlight lines, sketches and outlines are still painter overlays without depth.
 4. Section view has no cap faces (only an outline).
 5. Solver performance: analytic Jacobians and sparse linear algebra for large sketches.
-6. Missing Fusion features: component origins/own timelines, joint limits, contact sets, threads,
+6. Missing Fusion features: component origins/own timelines, contact sets, threads,
    drawings, sheet metal, sketch text.
 
 ## Conventions

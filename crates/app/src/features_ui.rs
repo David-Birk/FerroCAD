@@ -264,8 +264,8 @@ impl FeatureSession {
                     sel("Origin on moving part", K::JointOrigin, false),
                     sel("Origin on fixed part", K::JointOrigin, false),
                 ],
-                vec![expr("Angle", "0", "°"), expr("Offset", "0 mm", "mm")],
-                vec![("Flip", false)],
+                vec![expr("Angle", "0", "°"), expr("Offset", "0 mm", "mm"), expr("Minimum", "0", ""), expr("Maximum", "90", "")],
+                vec![("Flip", false), ("Limits", false)],
             ),
         };
         let mut s = FeatureSession { ty, editing: None, sels, active: 0, exprs, flags, op: 0 };
@@ -491,6 +491,7 @@ impl FeatureSession {
                     angle: self.e(0),
                     offset: self.e(1),
                     flip: self.flags[0].1,
+                    limits: self.flags[1].1.then(|| (self.e(2), self.e(3))),
                 })
             }
         })
@@ -584,8 +585,11 @@ impl FeatureSession {
                 (
                     T::Joint,
                     vec![j.moving.iter().cloned().map(Pick::Body).collect(), vec![origin(&j.from)], vec![origin(&j.to)]],
-                    vec![j.angle.clone(), j.offset.clone()],
-                    vec![j.flip],
+                    {
+                        let (lo, hi) = j.limits.clone().unwrap_or(("0".into(), "90".into()));
+                        vec![j.angle.clone(), j.offset.clone(), lo, hi]
+                    },
+                    vec![j.flip, j.limits.is_some()],
                     JointKind::ALL.iter().position(|k| *k == j.kind).unwrap_or(0),
                 )
             }
@@ -967,9 +971,15 @@ impl FerroApp {
                 ui.end_row();
             }
             let (ty, op) = (sess.ty, sess.op);
+            let limits_on = sess.ty == FeatureType::Joint && sess.flags.get(1).is_some_and(|f| f.1);
             for (i, e) in sess.exprs.iter_mut().enumerate() {
                 // Hole head values only for the chosen head type.
-                let shown = ty != FeatureType::Hole || i < 2 || (op == 1 && i < 4) || (op == 2 && (i == 2 || i == 4));
+                let shown = match ty {
+                    FeatureType::Hole => i < 2 || (op == 1 && i < 4) || (op == 2 && (i == 2 || i == 4)),
+                    // Joint limits only when switched on.
+                    FeatureType::Joint => i < 2 || limits_on,
+                    _ => true,
+                };
                 if !shown {
                     continue;
                 }

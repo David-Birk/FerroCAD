@@ -788,3 +788,54 @@ fn components_move_together_in_a_joint() {
         assert!((c[2] - 15.0).abs() < 1e-6, "{name} centre {c:?}");
     }
 }
+
+#[test]
+fn active_component_collects_new_bodies_and_joint_limits_clamp() {
+    let mut h = harness();
+    box_model(&mut h);
+    h.state_mut().selection = vec![Pick::Body("Body1".into())];
+    run(&mut h, Command::NewComponent);
+    // Activate it: a copy made now joins the component.
+    h.state_mut().doc.view.active_component = Some("Component1".into());
+    h.state_mut().selection = vec![Pick::Body("Body1".into())];
+    run(&mut h, Command::Feature(FeatureType::Move));
+    if let Mode::Feature(f) = &mut h.state_mut().mode {
+        f.exprs[0].text = "60 mm".into();
+        f.flags[0].1 = true;
+    }
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    assert_eq!(h.state().model.component_of("Body2"), Some("Component1"));
+    h.state_mut().doc.view.active_component = None;
+
+    // A second, separate body for a limited revolute joint.
+    let mut sf = ferrocad_model::SketchFeature::new(ferrocad_model::Plane::XY);
+    sf.sketch.add_rectangle([100.0, 0.0], [110.0, 10.0]);
+    let s = h.state_mut().doc.add("Sketch9", FeatureKind::Sketch(sf));
+    h.state_mut().doc.add(
+        "Extrude9",
+        FeatureKind::Extrude(ferrocad_model::ExtrudeFeature {
+            sketch: s,
+            profile_point: [101.0, 1.0],
+            distance: "5".into(),
+            symmetric: false,
+            operation: ferrocad_model::Operation::NewBody,
+        }),
+    );
+    h.state_mut().rebuild();
+    assert_eq!(h.state().model.component_of("Body3"), None);
+    h.state_mut().selection = vec![Pick::Body("Body3".into())];
+    run(&mut h, Command::Feature(FeatureType::Joint));
+    if let Mode::Feature(f) = &mut h.state_mut().mode {
+        f.pick(Pick::Face(FaceRef { point: [105.0, 5.0, 0.0], normal: [0.0, 0.0, -1.0] }));
+        f.pick(Pick::Face(FaceRef { point: [15.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0] }));
+        f.op = 1;
+        f.flags[1].1 = true; // limits 0 … 90
+        f.exprs[0].text = "200".into();
+    }
+    h.run_steps(3);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    let FeatureKind::Joint(j) = &h.state().doc.features().last().unwrap().kind else { panic!() };
+    assert_eq!(j.limits, Some(("0".to_string(), "90".to_string())));
+}

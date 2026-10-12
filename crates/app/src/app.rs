@@ -533,13 +533,22 @@ impl FerroApp {
         }
         let t = now - *start;
         let (id, base) = (*id, self.doc.params.eval(original).unwrap_or(0.0));
+        let params = self.doc.params.clone();
         let Some(FeatureKind::Joint(j)) = self.doc.feature_mut(id).map(|f| &mut f.kind) else {
             self.animation = None;
             return;
         };
+        // With limits: swing between them; without: turn / oscillate freely.
+        let limits = j.limits.as_ref().and_then(|(lo, hi)| Some((params.eval(lo).ok()?, params.eval(hi).ok()?)));
+        let swing = |lo: f64, hi: f64| lo + (hi - lo) * (0.5 - 0.5 * (t * 1.5).cos());
+        let value = match (j.kind, limits) {
+            (_, Some((lo, hi))) => swing(lo, hi),
+            (ferrocad_model::JointKind::Slider, None) => base + 20.0 * (t * 1.5).sin(),
+            (_, None) => base + (60.0 * t) % 360.0,
+        };
         match j.kind {
-            ferrocad_model::JointKind::Slider => j.offset = format!("{:.4}", base + 20.0 * (t * 1.5).sin()),
-            _ => j.angle = format!("{:.4}", base + (60.0 * t) % 360.0),
+            ferrocad_model::JointKind::Slider => j.offset = format!("{value:.4}"),
+            _ => j.angle = format!("{value:.4}"),
         }
         // Rebuild without touching the message or undo history.
         let message = self.message.clone();
@@ -600,6 +609,7 @@ impl FerroApp {
             hidden_bodies: self.bodies.iter().filter(|b| !b.visible).map(|b| b.name.clone()).collect(),
             hidden_features: self.hidden_sketches.iter().chain(&self.hidden_construction).copied().collect(),
             appearances: self.doc.view.appearances.clone(),
+            active_component: self.doc.view.active_component.clone(),
         };
         match std::fs::write(&path, io::save(&self.doc)) {
             Ok(()) => {
@@ -1068,6 +1078,10 @@ impl FerroApp {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak("mm");
+                if let Some(c) = &self.doc.view.active_component {
+                    ui.separator();
+                    ui.colored_label(theme::ACCENT, format!("Active: {c}"));
+                }
                 if let Mode::Sketch(sess) = &self.mode {
                     if let Some(a) = &sess.analysis {
                         ui.separator();

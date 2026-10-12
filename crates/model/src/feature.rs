@@ -373,6 +373,25 @@ pub struct JointFeature {
     pub offset: String,
     /// Align the z axes instead of opposing them.
     pub flip: bool,
+    /// Optional (min, max) for the motion: angle (°) of a revolute joint,
+    /// offset of a slider.
+    pub limits: Option<(String, String)>,
+}
+
+impl JointFeature {
+    /// Clamp a motion value to the limits (if any).
+    pub fn clamp(&self, value: f64, eval: &dyn Fn(&str) -> Result<f64, String>) -> Result<f64, String> {
+        match &self.limits {
+            None => Ok(value),
+            Some((lo, hi)) => {
+                let (lo, hi) = (eval(lo)?, eval(hi)?);
+                if lo > hi {
+                    return Err("the joint's minimum is larger than its maximum".into());
+                }
+                Ok(value.clamp(lo, hi))
+            }
+        }
+    }
 }
 
 /// Group bodies into a named component. Features that take bodies (joint,
@@ -455,7 +474,14 @@ impl FeatureKind {
             FeatureKind::Sketch(_) | FeatureKind::Axis(_) | FeatureKind::Mirror(_) | FeatureKind::Combine(_) => vec![],
             FeatureKind::Split(_) | FeatureKind::Loft(_) | FeatureKind::Sweep(_) | FeatureKind::Remove(_) => vec![],
             FeatureKind::Import(_) => vec![],
-            FeatureKind::Joint(j) => vec![("Angle (°)", &mut j.angle), ("Offset", &mut j.offset)],
+            FeatureKind::Joint(j) => {
+                let mut v: Vec<(&'static str, &mut String)> = vec![("Angle (°)", &mut j.angle), ("Offset", &mut j.offset)];
+                if let Some((lo, hi)) = &mut j.limits {
+                    v.push(("Minimum", lo));
+                    v.push(("Maximum", hi));
+                }
+                v
+            }
             FeatureKind::Component(_) => vec![],
             FeatureKind::Extrude(e) => vec![("Distance", &mut e.distance)],
             FeatureKind::Revolve(r) => vec![("Angle (°)", &mut r.angle)],
@@ -551,4 +577,7 @@ pub struct Feature {
     pub name: String,
     pub suppressed: bool,
     pub kind: FeatureKind,
+    /// Component that was active when the feature was made: bodies it
+    /// creates belong to that component.
+    pub component: Option<String>,
 }
