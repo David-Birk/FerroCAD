@@ -31,6 +31,11 @@ impl Kernel for Mock {
         Ok(Rc::new(MockSolid { desc, edges }))
     }
 
+    fn extrude_tapered(&self, p: &PlacedProfile, f: f64, b: f64, t: f64) -> Result<Self::Solid, KernelError> {
+        let desc = format!("taper(segs={}, f={f}, b={b}, t={:.1})", p.outer.segments.len(), t.to_degrees());
+        Ok(Rc::new(MockSolid { desc, edges: vec![] }))
+    }
+
     fn revolve(&self, p: &PlacedProfile, o: Vec3, d: Vec3, a: f64) -> Result<Self::Solid, KernelError> {
         let desc = format!(
             "revolve(segs={}, o={o:?}, d={d:?}, deg={:.1})",
@@ -47,6 +52,16 @@ impl Kernel for Mock {
 
     fn fillet(&self, s: &Self::Solid, e: &[EdgeRef], r: f64, chamfer: bool) -> Result<Self::Solid, KernelError> {
         let desc = format!("fillet({}, n={}, r={r}, chamfer={chamfer})", s.desc, e.len());
+        Ok(Rc::new(MockSolid { desc, edges: s.edges.clone() }))
+    }
+
+    fn chamfer_two(&self, s: &Self::Solid, e: &[EdgeRef], d1: f64, d2: f64) -> Result<Self::Solid, KernelError> {
+        let desc = format!("chamfer2({}, n={}, d1={d1}, d2={d2})", s.desc, e.len());
+        Ok(Rc::new(MockSolid { desc, edges: s.edges.clone() }))
+    }
+
+    fn draft(&self, s: &Self::Solid, f: &[FaceRef], o: Vec3, pull: Vec3, a: f64) -> Result<Self::Solid, KernelError> {
+        let desc = format!("draft({}, n={}, o={o:?}, pull={pull:?}, a={:.1})", s.desc, f.len(), a.to_degrees());
         Ok(Rc::new(MockSolid { desc, edges: s.edges.clone() }))
     }
 
@@ -141,6 +156,8 @@ pub fn plate_document() -> (Document, FeatureId, FeatureId) {
             distance: "thickness".into(),
             symmetric: false,
             operation: Operation::NewBody,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
     (doc, sketch, extrude)

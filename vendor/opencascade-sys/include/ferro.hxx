@@ -23,6 +23,7 @@
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakePipe.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
@@ -33,11 +34,14 @@
 #include <TColgp_HArray1OfPnt.hxx>
 #include <GProp_GProps.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
+#include <LocOpe_DPrism.hxx>
 #include <STEPControl_Reader.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -48,6 +52,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Lin.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 
 namespace ferro {
@@ -220,6 +225,62 @@ inline std::unique_ptr<TopoDS_Shape> ferro_fillet(const TopoDS_Shape &shape, rus
   });
 }
 
+/// Chamfer with two distances: `d1` on the first face adjacent to each edge,
+/// `d2` on the other one.
+inline std::unique_ptr<TopoDS_Shape> ferro_chamfer2(const TopoDS_Shape &shape, rust::Slice<const uint32_t> edges,
+                                                    double d1, double d2) {
+  return ferro::guard("chamfer", [&]() -> TopoDS_Shape {
+    auto all = ferro::edges_of(shape);
+    TopTools_IndexedDataMapOfShapeListOfShape faces;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, faces);
+    BRepFilletAPI_MakeChamfer mk(shape);
+    for (auto i : edges) {
+      if (i >= all.size()) {
+        ferro::fail("edge index out of range");
+      }
+      const TopTools_ListOfShape *adjacent = faces.Seek(all[i]);
+      if (adjacent == nullptr || adjacent->IsEmpty()) {
+        ferro::fail("edge has no adjacent face");
+      }
+      mk.Add(d1, d2, all[i], TopoDS::Face(adjacent->First()));
+    }
+    mk.Build();
+    if (!mk.IsDone()) {
+      ferro::fail("chamfer failed – the distances may be too large for the adjacent faces");
+    }
+    return mk.Shape();
+  });
+}
+
+/// Draft the given faces by p[6] radians around the neutral plane through
+/// p[0..3] whose normal p[3..6] is the pull direction.
+inline std::unique_ptr<TopoDS_Shape> ferro_draft(const TopoDS_Shape &shape, rust::Slice<const uint32_t> faces,
+                                                 rust::Slice<const double> p) {
+  return ferro::guard("draft", [&]() -> TopoDS_Shape {
+    if (p.size() < 7) {
+      ferro::fail("draft needs 7 values");
+    }
+    auto all = ferro::faces_of(shape);
+    gp_Dir dir(p[3], p[4], p[5]);
+    gp_Pln neutral(gp_Pnt(p[0], p[1], p[2]), dir);
+    BRepOffsetAPI_DraftAngle mk(shape);
+    for (auto i : faces) {
+      if (i >= all.size()) {
+        ferro::fail("face index out of range");
+      }
+      mk.Add(all[i], dir, p[6], neutral);
+      if (!mk.AddDone()) {
+        ferro::fail("this face cannot be drafted in that direction");
+      }
+    }
+    mk.Build();
+    if (!mk.IsDone()) {
+      ferro::fail("draft failed – the angle may be too large");
+    }
+    return mk.Shape();
+  });
+}
+
 /// op: 0 union, 1 subtract, 2 intersect. Coplanar faces are merged afterwards.
 inline std::unique_ptr<TopoDS_Shape> ferro_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b, uint32_t op) {
   return ferro::guard("boolean", [&]() -> TopoDS_Shape {
@@ -303,6 +364,23 @@ inline std::unique_ptr<TopoDS_Shape> ferro_prism(const TopoDS_Shape &face, doubl
     BRepPrimAPI_MakePrism mk(face, gp_Vec(dx, dy, dz));
     if (!mk.IsDone()) {
       ferro::fail("extrude failed");
+    }
+    return mk.Shape();
+  });
+}
+
+/// Tapered prism of a planar face: `h1` along the face normal, `h2` the
+/// other way, side faces drafted by `angle` (radians). `reverse` flips the face first.
+inline std::unique_ptr<TopoDS_Shape> ferro_draft_prism(const TopoDS_Shape &face, double h1, double h2, double angle,
+                                                       bool reverse) {
+  return ferro::guard("tapered extrude", [&]() -> TopoDS_Shape {
+    TopoDS_Face f = TopoDS::Face(face);
+    if (reverse) {
+      f = TopoDS::Face(f.Reversed());
+    }
+    LocOpe_DPrism mk(f, h1, h2, angle);
+    if (!mk.IsDone()) {
+      ferro::fail("tapered extrude failed – the taper may be too steep");
     }
     return mk.Shape();
   });

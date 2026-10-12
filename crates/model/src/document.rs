@@ -289,7 +289,21 @@ impl Document {
                     return Err("distance is zero".into());
                 }
                 let (_, placed) = self.placed_profile(i, e.sketch, e.profile_point)?;
-                let tool = k.extrude(&placed, distance, e.symmetric).map_err(|e| e.0)?;
+                let taper = eval(&e.taper)?;
+                if taper.abs() >= 89.0 {
+                    return Err("taper must be between -89° and 89°".into());
+                }
+                let tool = match (&e.distance2, taper.abs() > 1e-12) {
+                    (None, false) => k.extrude(&placed, distance, e.symmetric).map_err(kerr)?,
+                    (d2, _) => {
+                        let (fwd, back) = match d2 {
+                            Some(d2) => (distance, eval(d2)?),
+                            None if e.symmetric => (distance / 2.0, distance / 2.0),
+                            None => (distance, 0.0),
+                        };
+                        k.extrude_tapered(&placed, fwd, back, taper.to_radians()).map_err(kerr)?
+                    }
+                };
                 apply_operation(k, model, e.operation, tool, id, body_counter)
             }
 
@@ -364,7 +378,16 @@ impl Document {
                     if !refs.is_empty() {
                         let solid = &model.bodies[bi].solid;
                         model.bodies[bi].solid =
-                            k.fillet(solid, &refs, radius, f.chamfer).map_err(|e| e.0)?;
+                            match (&f.distance2, f.chamfer) {
+                                (Some(d2), true) => {
+                                    let d2 = eval(d2)?;
+                                    if d2 <= 0.0 {
+                                        return Err("distance 2 must be positive".into());
+                                    }
+                                    k.chamfer_two(solid, &refs, radius, d2).map_err(kerr)?
+                                }
+                                _ => k.fillet(solid, &refs, radius, f.chamfer).map_err(kerr)?,
+                            };
                     }
                 }
                 Ok(())
@@ -372,7 +395,15 @@ impl Document {
 
             FeatureKind::Plane(p) => {
                 let p = p.clone();
-                let base = resolve_plane(k, model, &p.base)?;
+                let mut base = resolve_plane(k, model, &p.base)?;
+                if let Some(b2) = &p.base2 {
+                    let other = resolve_plane(k, model, b2)?;
+                    let n = base.normal();
+                    if length(cross(n, other.normal())) > 1e-6 {
+                        return Err("midplane needs two parallel planes".into());
+                    }
+                    base.origin = add(base.origin, scale(n, dot(sub(other.origin, base.origin), n) / 2.0));
+                }
                 let offset = eval(&p.offset)?;
                 let angle = eval(&p.angle)?.to_radians();
                 let n = base.normal();
@@ -406,6 +437,27 @@ impl Document {
                 let tool = k.extrude_face(solid, &pp.face, d).map_err(kerr)?;
                 let op = if d > 0.0 { BooleanOp::Union } else { BooleanOp::Subtract };
                 model.bodies[bi].solid = k.boolean(op, solid, &tool).map_err(kerr)?;
+                Ok(())
+            }
+
+            FeatureKind::Draft(d) => {
+                let d = d.clone();
+                let angle = eval(&d.angle)?;
+                if angle.abs() >= 89.0 {
+                    return Err("angle must be between -89° and 89°".into());
+                }
+                let first = d.faces.first().ok_or("pick at least one face to draft")?;
+                let (bi, _) = find_face(k, model, first)?;
+                for f in &d.faces[1..] {
+                    if find_face(k, model, f)?.0 != bi {
+                        return Err("all faces must belong to the same body".into());
+                    }
+                }
+                let neutral = resolve_plane(k, model, &d.pull)?;
+                let pull = if d.flip { scale(neutral.normal(), -1.0) } else { neutral.normal() };
+                let solid = &model.bodies[bi].solid;
+                model.bodies[bi].solid =
+                    k.draft(solid, &d.faces, neutral.origin, pull, angle.to_radians()).map_err(kerr)?;
                 Ok(())
             }
 

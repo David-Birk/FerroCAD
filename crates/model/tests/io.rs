@@ -20,6 +20,8 @@ fn full_document() -> Document {
             distance: "-thickness".into(),
             symmetric: false,
             operation: Operation::Cut,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
     doc.add(
@@ -28,6 +30,7 @@ fn full_document() -> Document {
             edges: vec![EdgeRef { point: [20.0, 0.0, 0.0] }],
             radius: "0.5 mm".into(),
             chamfer: false,
+            distance2: None,
         }),
     );
     let ring = doc.add(

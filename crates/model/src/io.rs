@@ -183,6 +183,12 @@ fn feature_to_json(f: &Feature) -> Json {
             add("distance", e.distance.as_str().into());
             add("symmetric", e.symmetric.into());
             add("operation", op_name(e.operation).into());
+            if let Some(d2) = &e.distance2 {
+                add("distance2", d2.as_str().into());
+            }
+            if e.taper.trim() != "0" {
+                add("taper", e.taper.as_str().into());
+            }
         }
         FeatureKind::Revolve(r) => {
             add("type", "revolve".into());
@@ -205,12 +211,25 @@ fn feature_to_json(f: &Feature) -> Json {
             add("edges", Json::Arr(fl.edges.iter().map(|e| e.point.into()).collect()));
             add("radius", fl.radius.as_str().into());
             add("chamfer", fl.chamfer.into());
+            if let Some(d2) = &fl.distance2 {
+                add("distance2", d2.as_str().into());
+            }
         }
         FeatureKind::Plane(p) => {
             add("type", "plane".into());
             add("base", plane_ref_to_json(&p.base));
             add("offset", p.offset.as_str().into());
             add("angle", p.angle.as_str().into());
+            if let Some(b2) = &p.base2 {
+                add("base2", plane_ref_to_json(b2));
+            }
+        }
+        FeatureKind::Draft(d) => {
+            add("type", "draft".into());
+            add("faces", Json::Arr(d.faces.iter().map(face_to_json).collect()));
+            add("pull", plane_ref_to_json(&d.pull));
+            add("angle", d.angle.as_str().into());
+            add("flip", d.flip.into());
         }
         FeatureKind::Axis(a) => {
             add("type", "axis".into());
@@ -553,6 +572,8 @@ fn feature_from_json(f: &Json) -> R<Feature> {
             distance: f.get("distance")?.as_str()?.to_string(),
             symmetric: f.get("symmetric")?.as_bool()?,
             operation: op_from(f.get("operation")?)?,
+            distance2: f.get_opt("distance2").map(|d| d.as_str().map(str::to_string)).transpose()?,
+            taper: f.get_opt("taper").map(|t| t.as_str().map(str::to_string)).transpose()?.unwrap_or_else(|| "0".into()),
         }),
         "revolve" => {
             let axis = match f.get("axis")? {
@@ -580,11 +601,19 @@ fn feature_from_json(f: &Json) -> R<Feature> {
                 .collect::<Result<_, _>>()?,
             radius: f.get("radius")?.as_str()?.to_string(),
             chamfer: f.get("chamfer")?.as_bool()?,
+            distance2: f.get_opt("distance2").map(|d| d.as_str().map(str::to_string)).transpose()?,
         }),
         "plane" => FeatureKind::Plane(PlaneFeature {
             base: plane_ref_from(f.get("base")?)?,
             offset: str_of(f, "offset")?,
             angle: str_of(f, "angle")?,
+            base2: f.get_opt("base2").map(plane_ref_from).transpose()?,
+        }),
+        "draft" => FeatureKind::Draft(DraftFeature {
+            faces: f.get("faces")?.as_arr()?.iter().map(face_from).collect::<R<_>>()?,
+            pull: plane_ref_from(f.get("pull")?)?,
+            angle: str_of(f, "angle")?,
+            flip: f.get("flip")?.as_bool()?,
         }),
         "axis" => FeatureKind::Axis(AxisFeature {
             source: match (f.get_opt("edge"), f.get_opt("face_normal")) {

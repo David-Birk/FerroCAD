@@ -168,6 +168,16 @@ pub trait Kernel {
         symmetric: bool,
     ) -> Result<Self::Solid, KernelError>;
 
+    /// Extrude `forward` along the profile normal and `backward` against it,
+    /// with side faces tapered by `taper` radians (positive narrows).
+    fn extrude_tapered(
+        &self,
+        profile: &PlacedProfile,
+        forward: f64,
+        backward: f64,
+        taper: f64,
+    ) -> Result<Self::Solid, KernelError>;
+
     /// Revolve around the axis through `axis_origin` along `axis_dir`
     /// (right-hand rule) by `angle` radians.
     fn revolve(
@@ -194,6 +204,22 @@ pub trait Kernel {
         chamfer: bool,
     ) -> Result<Self::Solid, KernelError>;
 
+    /// Chamfer `edges` with `d1` on the first adjacent face and `d2` on the
+    /// other one.
+    fn chamfer_two(&self, solid: &Self::Solid, edges: &[EdgeRef], d1: f64, d2: f64)
+        -> Result<Self::Solid, KernelError>;
+
+    /// Tilt `faces` by `angle` radians around the neutral plane through
+    /// `origin` with normal `pull`; positive angles narrow the solid along `pull`.
+    fn draft(
+        &self,
+        solid: &Self::Solid,
+        faces: &[FaceRef],
+        origin: Vec3,
+        pull: Vec3,
+        angle: f64,
+    ) -> Result<Self::Solid, KernelError>;
+
     /// Tool solid made by moving the face matched by `face` along its outward
     /// normal by `distance` (negative: into the body).
     fn extrude_face(&self, solid: &Self::Solid, face: &FaceRef, distance: f64) -> Result<Self::Solid, KernelError>;
@@ -216,6 +242,11 @@ pub trait Kernel {
     fn is_empty(&self, solid: &Self::Solid) -> bool;
 
     fn properties(&self, solid: &Self::Solid) -> Option<MassProperties>;
+
+    /// Exact area of the face matched by `face` (None if unsupported).
+    fn face_area(&self, _solid: &Self::Solid, _face: &FaceRef) -> Option<f64> {
+        None
+    }
 
     /// Solids of a STEP file.
     fn import_step(&self, path: &Path) -> Result<Vec<Self::Solid>, KernelError>;

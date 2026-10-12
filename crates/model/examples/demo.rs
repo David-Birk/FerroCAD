@@ -29,6 +29,8 @@ fn main() {
             distance: "thickness".into(),
             symmetric: false,
             operation: Operation::NewBody,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
 
@@ -36,7 +38,7 @@ fn main() {
     let edges = [[0.0, 0.0, 5.0], [60.0, 0.0, 5.0], [60.0, 40.0, 5.0], [0.0, 40.0, 5.0]]
         .map(|point| EdgeRef { point })
         .to_vec();
-    doc.add("Fillet1", FeatureKind::Fillet(FilletFeature { edges, radius: "6 mm".into(), chamfer: false }));
+    doc.add("Fillet1", FeatureKind::Fillet(FilletFeature { edges, radius: "6 mm".into(), chamfer: false, distance2: None }));
 
     // A boss sketched on the top face, then extruded and joined.
     let top = FaceRef { point: [30.0, 20.0, 10.0], normal: [0.0, 0.0, 1.0] };
@@ -52,6 +54,8 @@ fn main() {
             distance: "12 mm".into(),
             symmetric: false,
             operation: Operation::Join,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
 
@@ -75,10 +79,11 @@ fn main() {
         edges: vec![EdgeRef { point: [30.0, 0.0, 10.0] }],
         radius: "2 mm".into(),
         chamfer: true,
+        distance2: None,
     }));
     doc.add(
         "Plane1",
-        FeatureKind::Plane(PlaneFeature { base: PlaneRef::Origin(OriginPlane::XY), offset: "30 mm".into(), angle: "0".into() }),
+        FeatureKind::Plane(PlaneFeature { base: PlaneRef::Origin(OriginPlane::XY), offset: "30 mm".into(), angle: "0".into(), base2: None }),
     );
     std::fs::write(&path, io::save(&doc)).unwrap();
     println!("wrote {path}");

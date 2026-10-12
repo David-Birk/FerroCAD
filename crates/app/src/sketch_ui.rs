@@ -348,6 +348,8 @@ pub struct SketchSession {
     pub clicks: Vec<Anchor>,
     pub selection: Vec<Pick>,
     pub dragging: Option<PointId>,
+    /// Start of a selection rectangle (Select tool dragged on empty space).
+    pub box_start: Option<Pos2>,
     pub analysis: Option<Analysis>,
     pub dim_edits: HashMap<ConstraintId, String>,
     /// Where each dimension is drawn (screen pixels from the geometry).
@@ -374,6 +376,7 @@ impl SketchSession {
             clicks: Vec::new(),
             selection: Vec::new(),
             dragging: None,
+            box_start: None,
             analysis: None,
             dim_edits: HashMap::new(),
             dim_offsets: HashMap::new(),
@@ -1152,7 +1155,40 @@ impl FerroApp {
         // ---- dragging points (select tool)
         if sess.tool == Tool::Select {
             if response.drag_started_by(egui::PointerButton::Primary) {
-                sess.dragging = response.interact_pointer_pos().and_then(|p| pick_point(&sf.sketch, &pr, p));
+                let origin = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos());
+                sess.dragging = origin.and_then(|p| pick_point(&sf.sketch, &pr, p));
+                // On empty space the drag draws a selection rectangle.
+                sess.box_start = origin.filter(|p| sess.dragging.is_none() && pick_entity(&sf.sketch, &pr, *p).is_none());
+            }
+            if let (Some(start), Some(now)) = (sess.box_start, response.interact_pointer_pos()) {
+                let rect = egui::Rect::from_two_pos(start, now);
+                let window = now.x >= start.x;
+                if response.drag_stopped() {
+                    let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+                    if !additive {
+                        sess.selection.clear();
+                    }
+                    for pick in box_select(&sf.sketch, &pr, rect, window) {
+                        if !sess.selection.contains(&pick) {
+                            sess.selection.push(pick);
+                        }
+                    }
+                    sess.box_start = None;
+                } else {
+                    // Window (left → right): fully inside; crossing (right → left): touching.
+                    let (fill, stroke) = if window {
+                        (theme::ACCENT.gamma_multiply(0.12), Stroke::new(1.0, theme::ACCENT))
+                    } else {
+                        (theme::GREEN.gamma_multiply(0.12), Stroke::new(1.0, theme::GREEN))
+                    };
+                    painter.rect_filled(rect, 0.0, fill);
+                    if window {
+                        painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+                    } else {
+                        let c = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom(), rect.left_top()];
+                        painter.extend(egui::Shape::dashed_line(&c, stroke, 6.0, 4.0));
+                    }
+                }
             }
             if let (Some(p), true) = (sess.dragging, response.dragged_by(egui::PointerButton::Primary)) {
                 if let Some(uv) = response.interact_pointer_pos().and_then(|pos| pr.local(pos)) {
@@ -2385,6 +2421,34 @@ fn handle_click(sess: &mut SketchSession, sk: &mut Sketch, anchor: Anchor, error
         }
         _ => None,
     }
+}
+
+/// Entities and points picked by a selection rectangle: fully inside
+/// (`window`) or touching it.
+fn box_select(sk: &Sketch, pr: &Projector, rect: Rect, window: bool) -> Vec<Pick> {
+    let mut out = Vec::new();
+    for (id, e) in sk.entities() {
+        let pts = pr.polyline(&entity_polyline(sk, e));
+        if pts.is_empty() {
+            continue;
+        }
+        // Densify straight pieces so crossings are found.
+        let samples: Vec<Pos2> = pts
+            .windows(2)
+            .flat_map(|w| (0..=8).map(move |k| w[0] + (w[1] - w[0]) * (k as f32 / 8.0)))
+            .chain(pts.iter().copied())
+            .collect();
+        let hit = if window { samples.iter().all(|p| rect.contains(*p)) } else { samples.iter().any(|p| rect.contains(*p)) };
+        if hit {
+            out.push(Pick::Entity(id));
+        }
+    }
+    for p in visible_points(sk) {
+        if pr.screen(sk.point_pos(p)).is_some_and(|s| rect.contains(s)) {
+            out.push(Pick::Point(p));
+        }
+    }
+    out
 }
 
 /// Turn the collected clicks into a spline (consecutive duplicates dropped).

@@ -144,6 +144,10 @@ pub struct ExtrudeFeature {
     pub distance: String,
     pub symmetric: bool,
     pub operation: Operation,
+    /// Second side: extrude this far against the normal as well (two sides).
+    pub distance2: Option<String>,
+    /// Taper angle in degrees (positive narrows), "0" for straight walls.
+    pub taper: String,
 }
 
 /// Axis of a revolve, in terms of the profile's sketch.
@@ -175,15 +179,30 @@ pub struct FilletFeature {
     pub radius: String,
     /// Bevel instead of round.
     pub chamfer: bool,
+    /// Chamfer only: distance on the second face (`radius` is the first).
+    pub distance2: Option<String>,
 }
 
 /// Construction plane: `base` rotated by `angle` (degrees) around its own
-/// x axis, then moved by `offset` along its normal.
+/// x axis, then moved by `offset` along its normal. With `base2` the plane
+/// starts halfway between the two (parallel) planes instead (midplane).
 #[derive(Clone, Debug)]
 pub struct PlaneFeature {
     pub base: PlaneRef,
     pub offset: String,
     pub angle: String,
+    pub base2: Option<PlaneRef>,
+}
+
+/// Tilt `faces` by `angle` (degrees) around the neutral plane `pull`, whose
+/// normal (reversed with `flip`) is the pull direction. Positive angles make
+/// the body narrower along the pull direction, so it releases from a mould.
+#[derive(Clone, Debug)]
+pub struct DraftFeature {
+    pub faces: Vec<FaceRef>,
+    pub pull: PlaneRef,
+    pub angle: String,
+    pub flip: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -424,6 +443,7 @@ pub enum FeatureKind {
     Axis(AxisFeature),
     PressPull(PressPullFeature),
     Shell(ShellFeature),
+    Draft(DraftFeature),
     Hole(HoleFeature),
     Mirror(MirrorFeature),
     Pattern(PatternFeature),
@@ -446,7 +466,9 @@ impl FeatureKind {
             FeatureKind::Revolve(_) => "Revolve",
             FeatureKind::Fillet(f) if f.chamfer => "Chamfer",
             FeatureKind::Fillet(_) => "Fillet",
+            FeatureKind::Plane(p) if p.base2.is_some() => "Midplane",
             FeatureKind::Plane(_) => "Construction plane",
+            FeatureKind::Draft(_) => "Draft",
             FeatureKind::Axis(_) => "Construction axis",
             FeatureKind::PressPull(_) => "Press Pull",
             FeatureKind::Shell(_) => "Shell",
@@ -483,9 +505,24 @@ impl FeatureKind {
                 v
             }
             FeatureKind::Component(_) => vec![],
-            FeatureKind::Extrude(e) => vec![("Distance", &mut e.distance)],
+            FeatureKind::Extrude(e) => {
+                let mut v: Vec<(&'static str, &mut String)> = vec![("Distance", &mut e.distance)];
+                if let Some(d2) = &mut e.distance2 {
+                    v.push(("Distance 2", d2));
+                }
+                v.push(("Taper (°)", &mut e.taper));
+                v
+            }
             FeatureKind::Revolve(r) => vec![("Angle (°)", &mut r.angle)],
-            FeatureKind::Fillet(f) => vec![(if f.chamfer { "Distance" } else { "Radius" }, &mut f.radius)],
+            FeatureKind::Fillet(f) => {
+                let mut v: Vec<(&'static str, &mut String)> =
+                    vec![(if f.chamfer { "Distance" } else { "Radius" }, &mut f.radius)];
+                if let (true, Some(d2)) = (f.chamfer, &mut f.distance2) {
+                    v.push(("Distance 2", d2));
+                }
+                v
+            }
+            FeatureKind::Draft(d) => vec![("Angle (°)", &mut d.angle)],
             FeatureKind::Plane(p) => vec![("Offset", &mut p.offset), ("Angle (°)", &mut p.angle)],
             FeatureKind::PressPull(p) => vec![("Distance", &mut p.distance)],
             FeatureKind::Shell(sh) => vec![("Thickness", &mut sh.thickness)],
@@ -540,7 +577,8 @@ impl FeatureKind {
                 RevolveAxis::Axis(AxisRef::Construction(a)) => vec![r.sketch, a],
                 _ => vec![r.sketch],
             },
-            FeatureKind::Plane(p) => plane(&p.base),
+            FeatureKind::Plane(p) => [plane(&p.base), p.base2.as_ref().map(plane).unwrap_or_default()].concat(),
+            FeatureKind::Draft(d) => plane(&d.pull),
             FeatureKind::Mirror(m) => plane(&m.plane),
             FeatureKind::Split(s) => plane(&s.plane),
             FeatureKind::Pattern(p) => match &p.kind {

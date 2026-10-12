@@ -34,6 +34,7 @@ const SOLID_MODIFY: &[Entry] = &[
     Entry(Command::Parameters, Icon::Parameters, "Parameters", "Change user parameters"),
 ];
 const SOLID_MODIFY_MORE: &[Entry] = &[
+    Entry(Command::Feature(F::Draft), Icon::Draft, "Draft", "Tilt faces for mould release"),
     Entry(Command::Feature(F::Split), Icon::Split, "Split Body", "Split a body at a plane"),
     Entry(Command::Feature(F::Move), Icon::Move, "Move/Copy", "Move, rotate or copy bodies (M)"),
     Entry(Command::RemoveBodies, Icon::Delete, "Remove", "Remove the selected bodies (Del)"),
@@ -42,8 +43,10 @@ const SOLID_CONSTRUCT: &[Entry] = &[
     Entry(Command::Feature(F::Plane), Icon::Plane, "Plane", "Offset plane / plane at angle"),
     Entry(Command::Feature(F::AxisEdge), Icon::Axis, "Axis", "Axis through an edge (straight or circular)"),
 ];
-const SOLID_CONSTRUCT_MORE: &[Entry] =
-    &[Entry(Command::Feature(F::AxisFace), Icon::Axis, "Axis Normal to Face", "Axis perpendicular to a face at a point")];
+const SOLID_CONSTRUCT_MORE: &[Entry] = &[
+    Entry(Command::Feature(F::Midplane), Icon::Midplane, "Midplane", "Plane halfway between two parallel planes or faces"),
+    Entry(Command::Feature(F::AxisFace), Icon::Axis, "Axis Normal to Face", "Axis perpendicular to a face at a point"),
+];
 const SOLID_ASSEMBLE: &[Entry] = &[
     Entry(Command::NewComponent, Icon::Body, "Component", "New component from the selected bodies"),
     Entry(Command::Feature(F::Joint), Icon::Joint, "Joint", "Place bodies at each other (rigid, revolute, slider)"),

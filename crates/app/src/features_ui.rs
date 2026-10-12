@@ -20,6 +20,7 @@ use ferrocad_view::Viewport;
 pub enum FeatureType {
     PressPull,
     Shell,
+    Draft,
     Hole,
     Mirror,
     RectPattern,
@@ -30,6 +31,7 @@ pub enum FeatureType {
     Loft,
     Sweep,
     Plane,
+    Midplane,
     AxisEdge,
     AxisFace,
     Joint,
@@ -40,6 +42,7 @@ impl FeatureType {
         match self {
             FeatureType::PressPull => "Press Pull",
             FeatureType::Shell => "Shell",
+            FeatureType::Draft => "Draft",
             FeatureType::Hole => "Hole",
             FeatureType::Mirror => "Mirror",
             FeatureType::RectPattern => "Rectangular Pattern",
@@ -50,6 +53,7 @@ impl FeatureType {
             FeatureType::Loft => "Loft",
             FeatureType::Sweep => "Sweep",
             FeatureType::Plane => "Construction Plane",
+            FeatureType::Midplane => "Midplane",
             FeatureType::AxisEdge => "Axis Through Edge",
             FeatureType::AxisFace => "Axis Normal to Face",
             FeatureType::Joint => "Joint",
@@ -60,6 +64,7 @@ impl FeatureType {
         match self {
             FeatureType::PressPull => Icon::PressPull,
             FeatureType::Shell => Icon::Shell,
+            FeatureType::Draft => Icon::Draft,
             FeatureType::Hole => Icon::Hole,
             FeatureType::Mirror => Icon::Mirror,
             FeatureType::RectPattern => Icon::RectPattern,
@@ -70,6 +75,7 @@ impl FeatureType {
             FeatureType::Loft => Icon::Loft,
             FeatureType::Sweep => Icon::Sweep,
             FeatureType::Plane => Icon::Plane,
+            FeatureType::Midplane => Icon::Midplane,
             FeatureType::AxisEdge | FeatureType::AxisFace => Icon::Axis,
             FeatureType::Joint => Icon::Joint,
         }
@@ -82,6 +88,7 @@ impl FeatureType {
             FeatureType::Split => "Split",
             FeatureType::Move => "Move",
             FeatureType::AxisEdge | FeatureType::AxisFace => "Axis",
+            FeatureType::Midplane => "Plane",
             other => other.title(),
         }
     }
@@ -187,6 +194,11 @@ impl FeatureSession {
         let (sels, exprs, flags): (Vec<SelInput>, Vec<ExprInput>, Vec<(&str, bool)>) = match ty {
             T::PressPull => (vec![sel("Face", K::FlatFace, false)], vec![expr("Distance", "5 mm", "mm")], vec![]),
             T::Shell => (vec![sel("Faces to remove", K::Face, true)], vec![expr("Thickness", "1 mm", "mm")], vec![]),
+            T::Draft => (
+                vec![sel("Faces", K::Face, true), sel("Pull direction", K::Plane, false)],
+                vec![expr("Angle", "3", "°")],
+                vec![("Flip", false)],
+            ),
             T::Hole => (
                 vec![sel("Position", K::FlatFace, false)],
                 vec![
@@ -256,6 +268,7 @@ impl FeatureSession {
                 vec![expr("Offset", "10 mm", "mm"), expr("Angle", "0", "°")],
                 vec![],
             ),
+            T::Midplane => (vec![sel("Plane 1", K::Plane, false), sel("Plane 2", K::Plane, false)], vec![], vec![]),
             T::AxisEdge => (vec![sel("Edge", K::Edge, false)], vec![], vec![]),
             T::AxisFace => (vec![sel("Face", K::Face, false)], vec![], vec![]),
             T::Joint => (
@@ -467,7 +480,23 @@ impl FeatureSession {
                     operation: self.operation(),
                 })
             }
-            T::Plane => FeatureKind::Plane(PlaneFeature { base: self.plane(0)?, offset: self.e(0), angle: self.e(1) }),
+            T::Plane => {
+                FeatureKind::Plane(PlaneFeature { base: self.plane(0)?, offset: self.e(0), angle: self.e(1), base2: None })
+            }
+            T::Midplane => FeatureKind::Plane(PlaneFeature {
+                base: self.plane(0)?,
+                offset: "0".into(),
+                angle: "0".into(),
+                base2: Some(self.plane(1)?),
+            }),
+            T::Draft => {
+                let faces: Vec<FaceRef> =
+                    self.sels[0].picks.iter().filter_map(|p| if let Pick::Face(f) = p { Some(*f) } else { None }).collect();
+                if faces.is_empty() {
+                    return Err("select the faces to draft".into());
+                }
+                FeatureKind::Draft(DraftFeature { faces, pull: self.plane(1)?, angle: self.e(0), flip: self.flags[0].1 })
+            }
             T::AxisEdge => FeatureKind::Axis(AxisFeature {
                 source: match self.one(0)? {
                     Pick::Edge(e) => AxisSource::Edge(*e),
@@ -572,7 +601,17 @@ impl FeatureSession {
                 vec![],
                 Operation::ALL.iter().position(|o| *o == s.operation).unwrap_or(0),
             ),
-            FeatureKind::Plane(p) => (T::Plane, vec![vec![Pick::Plane(p.base)]], vec![p.offset.clone(), p.angle.clone()], vec![], 0),
+            FeatureKind::Plane(p) => match p.base2 {
+                Some(b2) => (T::Midplane, vec![vec![Pick::Plane(p.base)], vec![Pick::Plane(b2)]], vec![], vec![], 0),
+                None => (T::Plane, vec![vec![Pick::Plane(p.base)]], vec![p.offset.clone(), p.angle.clone()], vec![], 0),
+            },
+            FeatureKind::Draft(d) => (
+                T::Draft,
+                vec![d.faces.iter().map(|f| Pick::Face(*f)).collect(), vec![Pick::Plane(d.pull)]],
+                vec![d.angle.clone()],
+                vec![d.flip],
+                0,
+            ),
             FeatureKind::Axis(a) => match a.source {
                 AxisSource::Edge(e) => (T::AxisEdge, vec![vec![Pick::Edge(e)]], vec![], vec![], 0),
                 AxisSource::FaceNormal(f) => (T::AxisFace, vec![vec![Pick::Face(f)]], vec![], vec![], 0),

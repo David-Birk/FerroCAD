@@ -654,6 +654,7 @@ impl FerroApp {
                     item(ui, Command::Feature(FeatureType::PressPull), Icon::PressPull, "Press Pull   Q");
                     item(ui, Command::Feature(FeatureType::Hole), Icon::Hole, "Hole   H");
                     item(ui, Command::Feature(FeatureType::Shell), Icon::Shell, "Shell (remove faces)");
+                    item(ui, Command::Feature(FeatureType::Draft), Icon::Draft, "Draft");
                     item(ui, Command::Feature(FeatureType::Plane), Icon::Plane, "Offset Plane");
                     item(ui, Command::Feature(FeatureType::AxisFace), Icon::Axis, "Axis Normal to Face");
                     ui.separator();

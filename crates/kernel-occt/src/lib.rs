@@ -95,6 +95,26 @@ fn face_index(shape: &Shape, face: &FaceRef) -> Result<(u32, safe::FaceHit), Ker
         .ok_or_else(|| KernelError("the face no longer exists – re-pick it".into()))
 }
 
+/// Indices (in `edges()` order) of the edges nearest to each reference by
+/// midpoint. The explorer visits shared edges once per face, so de-duplicate.
+fn edge_indices(solid: &Shape, refs: &[EdgeRef]) -> Result<Vec<u32>, KernelError> {
+    let mids: Vec<Option<Vec3>> = edge_polylines(solid).iter().map(|pl| polyline_midpoint(pl)).collect();
+    let mut picked: Vec<usize> = Vec::new();
+    for r in refs {
+        let best = mids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| m.map(|m| (i, distance(m, r.point))))
+            .min_by(|x, y| x.1.total_cmp(&y.1))
+            .ok_or_else(|| KernelError("solid has no edges".into()))?;
+        let m = mids[best.0].expect("filtered above");
+        if !picked.iter().any(|&p| mids[p].is_some_and(|q| distance(q, m) < 1e-9)) {
+            picked.push(best.0);
+        }
+    }
+    Ok(picked.iter().map(|&i| i as u32).collect())
+}
+
 impl Kernel for OcctKernel {
     type Solid = Rc<Shape>;
 
@@ -105,6 +125,33 @@ impl Kernel for OcctKernel {
         }
         let solid = safe::prism(&face, v(scale(profile.normal, dist))).map_err(err)?;
         Ok(Rc::new(solid))
+    }
+
+    fn extrude_tapered(
+        &self,
+        profile: &PlacedProfile,
+        forward: f64,
+        backward: f64,
+        taper: f64,
+    ) -> Result<Self::Solid, KernelError> {
+        let face = profile_face(profile)?;
+        let n = v(profile.normal);
+        if taper.abs() < 1e-12 {
+            let base = safe::translate(&face, -n * backward).map_err(err)?;
+            return Ok(Rc::new(safe::prism(&base, n * (forward + backward)).map_err(err)?));
+        }
+        // LocOpe_DPrism takes a height along the normal and one against it;
+        // a flipped extrude (negative forward) goes against the normal.
+        // The draft continues through the face, so on the far side the
+        // angle flips to keep "positive narrows".
+        let (h1, h2, angle) = if forward < 0.0 && backward <= 0.0 {
+            (-backward, -forward, -taper)
+        } else {
+            (forward, backward, taper)
+        };
+        // LocOpe_DPrism measures along the drafted side, not perpendicular.
+        let c = taper.cos();
+        Ok(Rc::new(safe::draft_prism(&face, h1 / c, h2 / c, angle, false).map_err(err)?))
     }
 
     fn revolve(
@@ -135,24 +182,31 @@ impl Kernel for OcctKernel {
         radius: f64,
         chamfer: bool,
     ) -> Result<Self::Solid, KernelError> {
-        // Match each reference to the nearest edge by midpoint. The explorer
-        // visits shared edges once per face, so de-duplicate by midpoint.
-        let mids: Vec<Option<Vec3>> = edge_polylines(solid).iter().map(|pl| polyline_midpoint(pl)).collect();
-        let mut picked: Vec<usize> = Vec::new();
-        for r in refs {
-            let best = mids
-                .iter()
-                .enumerate()
-                .filter_map(|(i, m)| m.map(|m| (i, distance(m, r.point))))
-                .min_by(|x, y| x.1.total_cmp(&y.1))
-                .ok_or_else(|| KernelError("solid has no edges".into()))?;
-            let m = mids[best.0].expect("filtered above");
-            if !picked.iter().any(|&p| mids[p].is_some_and(|q| distance(q, m) < 1e-9)) {
-                picked.push(best.0);
+        let indices = edge_indices(solid, refs)?;
+        Ok(Rc::new(safe::fillet(solid, &indices, radius, chamfer).map_err(err)?))
+    }
+
+    fn chamfer_two(&self, solid: &Self::Solid, refs: &[EdgeRef], d1: f64, d2: f64) -> Result<Self::Solid, KernelError> {
+        let indices = edge_indices(solid, refs)?;
+        Ok(Rc::new(safe::chamfer2(solid, &indices, d1, d2).map_err(err)?))
+    }
+
+    fn draft(
+        &self,
+        solid: &Self::Solid,
+        faces: &[FaceRef],
+        origin: Vec3,
+        pull: Vec3,
+        angle: f64,
+    ) -> Result<Self::Solid, KernelError> {
+        let mut indices = Vec::new();
+        for f in faces {
+            let (i, _) = face_index(solid, f)?;
+            if !indices.contains(&i) {
+                indices.push(i);
             }
         }
-        let indices: Vec<u32> = picked.iter().map(|&i| i as u32).collect();
-        Ok(Rc::new(safe::fillet(solid, &indices, radius, chamfer).map_err(err)?))
+        Ok(Rc::new(safe::draft(solid, &indices, v(origin), v(pull), angle).map_err(err)?))
     }
 
     fn extrude_face(&self, solid: &Self::Solid, face: &FaceRef, distance: f64) -> Result<Self::Solid, KernelError> {
@@ -216,6 +270,11 @@ impl Kernel for OcctKernel {
         safe::properties(solid).map(|(volume, area, c)| MassProperties { volume, area, center: a(c) })
     }
 
+    fn face_area(&self, solid: &Self::Solid, face: &FaceRef) -> Option<f64> {
+        let (i, _) = face_index(solid, face).ok()?;
+        safe::properties(&safe::face(solid, i).ok()?).map(|(_, area, _)| area)
+    }
+
     fn import_step(&self, path: &Path) -> Result<Vec<Self::Solid>, KernelError> {
         if !path.exists() {
             return Err(KernelError(format!("file not found: {}", path.display())));
@@ -263,6 +322,17 @@ mod tests {
         k.properties(s).unwrap().volume
     }
 
+    impl OcctKernel {
+        /// (min z, max z) of the tessellated solid.
+        fn bounds_z(&self, s: &Rc<Shape>) -> (f64, f64) {
+            let m = self.tessellate(s, 0.01).unwrap();
+            let zs = m.positions.iter().map(|p| p[2]);
+            let lo = zs.clone().fold(f64::INFINITY, f64::min);
+            let hi = zs.fold(f64::NEG_INFINITY, f64::max);
+            ((lo * 1e6).round() / 1e6, (hi * 1e6).round() / 1e6)
+        }
+    }
+
     #[test]
     fn box_operations() {
         let k = OcctKernel::new();
@@ -293,6 +363,58 @@ mod tests {
         assert!(k.is_empty(&k.boolean(BooleanOp::Intersect, &b, &moved).unwrap()));
         let mirrored = k.transform(&b, &Transform::Mirror { origin: [0.0; 3], normal: [1.0, 0.0, 0.0] }).unwrap();
         assert!((volume(&k, &mirrored) - 1000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tapered_and_two_sided_extrudes() {
+        let k = OcctKernel::new();
+        // 10 × 10 square, 10 high, 10° taper: a frustum narrowing upwards.
+        let t = 10f64.to_radians();
+        let s = k.extrude_tapered(&rect(10.0, 10.0), 10.0, 0.0, t).unwrap();
+        let top = 10.0 - 2.0 * 10.0 * t.tan();
+        let expected = 10.0 / 3.0 * (100.0 + top * top + 10.0 * top);
+        let got = volume(&k, &s);
+        assert!((got - expected).abs() < 1e-3, "{got} vs {expected}");
+        let b = k.bounds_z(&s);
+        assert!((b.0 - 0.0).abs() < 1e-6 && (b.1 - 10.0).abs() < 1e-6, "{b:?}");
+        // Two sides, no taper: 4 up and 6 down.
+        let two = k.extrude_tapered(&rect(10.0, 10.0), 4.0, 6.0, 0.0).unwrap();
+        assert!((volume(&k, &two) - 1000.0).abs() < 1e-6);
+        assert_eq!(k.bounds_z(&two), (-6.0, 4.0));
+        // Downwards with a taper.
+        let down = k.extrude_tapered(&rect(10.0, 10.0), -10.0, 0.0, t).unwrap();
+        assert!((volume(&k, &down) - expected).abs() < 1e-3);
+        assert!((k.bounds_z(&down).0 + 10.0).abs() < 1e-6);
+        // Far too steep must not crash (OCCT may still build something).
+        let _ = k.extrude_tapered(&rect(10.0, 10.0), 50.0, 0.0, 60f64.to_radians());
+    }
+
+    #[test]
+    fn two_distance_chamfer_and_draft() {
+        let k = OcctKernel::new();
+        let cube = k.extrude(&rect(10.0, 10.0), 10.0, false).unwrap();
+        // Top edge along y at x = 10: a 1 × 3 bevel removes 15 mm³.
+        let c = k.chamfer_two(&cube, &[EdgeRef { point: [10.0, 5.0, 10.0] }], 1.0, 3.0).unwrap();
+        assert!((volume(&k, &c) - 985.0).abs() < 1e-6, "{}", volume(&k, &c));
+        assert!(k.chamfer_two(&cube, &[EdgeRef { point: [10.0, 5.0, 10.0] }], 20.0, 3.0).is_err());
+
+        // Draft the x faces by 5° around the bottom: narrower towards +z.
+        let sides = [
+            FaceRef { point: [0.0, 5.0, 5.0], normal: [-1.0, 0.0, 0.0] },
+            FaceRef { point: [10.0, 5.0, 5.0], normal: [1.0, 0.0, 0.0] },
+        ];
+        let a = 5f64.to_radians();
+        let d = k.draft(&cube, &sides, [0.0; 3], [0.0, 0.0, 1.0], a).unwrap();
+        let expected = (10.0 + (10.0 - 20.0 * a.tan())) / 2.0 * 10.0 * 10.0;
+        assert!((volume(&k, &d) - expected).abs() < 1e-3, "{} vs {expected}", volume(&k, &d));
+        // Pulling the other way widens it.
+        let w = k.draft(&cube, &sides, [0.0; 3], [0.0, 0.0, -1.0], a).unwrap();
+        assert!(volume(&k, &w) > 1000.0);
+        // Face areas are exact, also on curved faces.
+        assert!((k.face_area(&cube, &sides[0]).unwrap() - 100.0).abs() < 1e-9);
+        // The top face is perpendicular to the pull direction: no draft.
+        let top = FaceRef { point: [5.0, 5.0, 10.0], normal: [0.0, 0.0, 1.0] };
+        assert!(k.draft(&cube, &[top], [0.0; 3], [0.0, 0.0, 1.0], a).is_err());
     }
 
     #[test]
@@ -381,6 +503,8 @@ mod hole_tests {
                 distance: "10".into(),
                 symmetric: false,
                 operation: Operation::NewBody,
+                distance2: None,
+                taper: "0".into(),
             }),
         );
         let face = |x: f64| FaceRef { point: [x, 10.0, 10.0], normal: [0.0, 0.0, 1.0] };
@@ -438,6 +562,8 @@ mod joint_tests {
                 distance: "5".into(),
                 symmetric: false,
                 operation: Operation::NewBody,
+                distance2: None,
+                taper: "0".into(),
             }),
         );
         let mut pin = SketchFeature::new(Plane::XY);
@@ -451,6 +577,8 @@ mod joint_tests {
                 distance: "15".into(),
                 symmetric: false,
                 operation: Operation::NewBody,
+                distance2: None,
+                taper: "0".into(),
             }),
         );
         // Bottom edge of the pin onto the top edge of the hole.

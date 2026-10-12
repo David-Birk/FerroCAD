@@ -23,6 +23,8 @@ pub enum Icon {
     Parameters,
     PressPull,
     Shell,
+    Draft,
+    Midplane,
     Hole,
     Mirror,
     RectPattern,
@@ -273,6 +275,17 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32, enabled:
             p.poly(&[(0.12, 0.2), (0.24, 0.2), (0.24, 0.74), (0.12, 0.74)], faded(a, 160), None);
             p.poly(&[(0.76, 0.2), (0.88, 0.2), (0.88, 0.74), (0.76, 0.74)], faded(a, 160), None);
             p.poly(&[(0.12, 0.74), (0.88, 0.74), (0.88, 0.86), (0.12, 0.86)], faded(a, 160), None);
+        }
+        Draft => {
+            p.poly(&[(0.3, 0.18), (0.7, 0.18), (0.86, 0.86), (0.14, 0.86)], faded(a, 120), Some(c));
+            p.line(&[(0.3, 0.18), (0.3, 0.86)], faded(c, 110));
+            p.line(&[(0.06, 0.86), (0.94, 0.86)], theme::ORANGE);
+            p.arrow(&[(0.5, 0.7), (0.5, 0.04)], a);
+        }
+        Midplane => {
+            p.line(&[(0.08, 0.88), (0.6, 0.88), (0.92, 0.6)], c);
+            p.line(&[(0.08, 0.36), (0.6, 0.36), (0.92, 0.08)], c);
+            p.poly(&[(0.08, 0.62), (0.6, 0.62), (0.92, 0.34), (0.4, 0.34)], faded(a, 110), Some(a));
         }
         Hole => {
             p.poly(&[(0.1, 0.4), (0.6, 0.4), (0.9, 0.24), (0.4, 0.24)], faded(c, 60), Some(c));

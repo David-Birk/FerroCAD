@@ -7,7 +7,7 @@ use crate::picking::PICK_PX;
 use crate::theme;
 use egui::{Pos2, RichText, Stroke};
 use ferrocad_model::document::polyline_axis;
-use ferrocad_model::geom::{distance, sub, Vec3};
+use ferrocad_model::geom::{cross, distance, dot, length, normalize, sub, Vec3};
 use ferrocad_model::Kernel;
 use ferrocad_view::Viewport;
 
@@ -16,7 +16,34 @@ pub struct MeasurePick {
     pub point: Vec3,
     /// The picked edge, if the pick was an edge.
     pub edge: Option<Vec<Vec3>>,
+    /// Outward normal of a picked flat face.
+    pub normal: Option<Vec3>,
+    /// Area of a picked face.
+    pub area: Option<f64>,
     pub what: &'static str,
+}
+
+impl MeasurePick {
+    /// Direction of a straight edge.
+    fn line_dir(&self) -> Option<Vec3> {
+        let e = self.edge.as_ref()?;
+        let (a, b) = (*e.first()?, *e.last()?);
+        let d = sub(b, a);
+        let straight = e.iter().all(|p| length(cross(sub(*p, a), d)) <= 1e-6 * dot(d, d).max(1e-12));
+        (straight && length(d) > 1e-9).then(|| normalize(d))
+    }
+}
+
+/// Angle in degrees between two picks: face normals (0° = parallel faces),
+/// two straight edges (acute), or an edge against a face (0° = in plane).
+fn pick_angle(a: &MeasurePick, b: &MeasurePick) -> Option<f64> {
+    let deg = |c: f64| c.clamp(-1.0, 1.0).acos().to_degrees();
+    match (a.normal, b.normal, a.line_dir(), b.line_dir()) {
+        (Some(n), Some(m), _, _) => Some(deg(dot(n, m))),
+        (_, _, Some(u), Some(w)) => Some(deg(dot(u, w).abs())),
+        (Some(n), _, _, Some(u)) | (_, Some(n), Some(u), _) => Some(90.0 - deg(dot(n, u).abs())),
+        _ => None,
+    }
 }
 
 #[derive(Default)]
@@ -66,7 +93,7 @@ impl FerroApp {
             }
         }
         if let Some((_, v)) = best {
-            return Some(MeasurePick { point: v, edge: None, what: "vertex" });
+            return Some(MeasurePick { point: v, edge: None, normal: None, area: None, what: "vertex" });
         }
         if let Some((_, poly)) = self.pick_edge(pos, vp) {
             let point = poly
@@ -74,9 +101,13 @@ impl FerroApp {
                 .filter_map(|q| self.camera.project(*q, vp).map(|s| ((s[0] - p[0]).hypot(s[1] - p[1]), *q)))
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map(|(_, q)| q)?;
-            return Some(MeasurePick { point, edge: Some(poly), what: "edge" });
+            return Some(MeasurePick { point, edge: Some(poly), normal: None, area: None, what: "edge" });
         }
-        self.pick_face(pos, vp).map(|f| MeasurePick { point: f.face.point, edge: None, what: "face" })
+        let f = self.pick_face(pos, vp)?;
+        let name = &self.bodies[f.body].name;
+        let area = self.model.bodies.iter().find(|b| b.name == *name).and_then(|b| self.kernel.face_area(&b.solid, &f.face));
+        let normal = f.planar.then(|| normalize(f.face.normal));
+        Some(MeasurePick { point: f.face.point, edge: None, normal, area, what: "face" })
     }
 
     pub fn measure_viewport(&mut self, response: &egui::Response, painter: &egui::Painter, vp: &Viewport) {
@@ -148,6 +179,16 @@ impl FerroApp {
                         }
                     }
                 }
+                if let (Some(area), 1) = (m.area, picks.len()) {
+                    form_label(ui, "Area");
+                    ui.label(RichText::new(format!("{area:.3} mm²")).strong());
+                    ui.end_row();
+                }
+            }
+            if let Some(angle) = picks.first().zip(picks.get(1)).and_then(|(a, b)| pick_angle(a, b)) {
+                form_label(ui, "Angle");
+                ui.label(RichText::new(format!("{angle:.3}°")).strong());
+                ui.end_row();
             }
             if let [a, b] = picks.as_slice() {
                 let d = sub(b.point, a.point);

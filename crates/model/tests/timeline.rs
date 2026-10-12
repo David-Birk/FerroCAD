@@ -49,6 +49,8 @@ fn errors_do_not_stop_later_features() {
             distance: "3".into(),
             symmetric: true,
             operation: Operation::NewBody,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
     let model = doc.rebuild(&Mock);
@@ -72,6 +74,8 @@ fn cut_and_join() {
             distance: "thickness".into(),
             symmetric: false,
             operation: Operation::Cut,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
     doc.add(
@@ -82,6 +86,8 @@ fn cut_and_join() {
             distance: "-2".into(),
             symmetric: false,
             operation: Operation::Join,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
     let model = doc.rebuild(&Mock);
@@ -102,6 +108,7 @@ fn fillet_finds_its_body_and_survives_small_changes() {
             edges: vec![EdgeRef { point: [20.0, 0.0, 0.0] }],
             radius: "1".into(),
             chamfer: false,
+            distance2: None,
         }),
     );
     let model = doc.rebuild(&Mock);
@@ -144,6 +151,8 @@ fn profile_point_selects_hole_region() {
             distance: "4".into(),
             symmetric: false,
             operation: Operation::NewBody,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
     let model = doc.rebuild(&Mock);

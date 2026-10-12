@@ -22,6 +22,7 @@ fn sketch_follows_offset_plane() {
             base: PlaneRef::Origin(OriginPlane::XY),
             offset: "thickness * 2".into(),
             angle: "0".into(),
+            base2: None,
         }),
     );
     let mut sf = SketchFeature::new(Plane::XY);
@@ -45,7 +46,7 @@ fn angled_plane_turns_around_its_x_axis() {
     let mut doc = Document::new();
     let p = doc.add(
         "Plane1",
-        FeatureKind::Plane(PlaneFeature { base: PlaneRef::Origin(OriginPlane::XY), offset: "0".into(), angle: "90".into() }),
+        FeatureKind::Plane(PlaneFeature { base: PlaneRef::Origin(OriginPlane::XY), offset: "0".into(), angle: "90".into(), base2: None }),
     );
     let m = doc.rebuild(&Mock);
     let n = m.planes[&p].normal();
@@ -229,7 +230,7 @@ fn every_new_feature_roundtrips_through_fcad() {
     let (mut doc, sketch, _) = plate_document();
     let plane = doc.add(
         "Plane1",
-        FeatureKind::Plane(PlaneFeature { base: PlaneRef::Face(top_face()), offset: "2".into(), angle: "10".into() }),
+        FeatureKind::Plane(PlaneFeature { base: PlaneRef::Face(top_face()), offset: "2".into(), angle: "10".into(), base2: None }),
     );
     let mut sf = SketchFeature::new(Plane::XY);
     sf.attach = Some(PlaneRef::Construction(plane));
@@ -467,6 +468,8 @@ fn bodies_made_while_a_component_is_active_belong_to_it() {
             distance: "3".into(),
             symmetric: false,
             operation: Operation::NewBody,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
     doc.view.active_component = None;
@@ -487,4 +490,98 @@ fn bodies_made_while_a_component_is_active_belong_to_it() {
     let back = io::load(&io::save(&doc)).unwrap();
     assert_eq!(io::save(&back), io::save(&doc));
     assert_eq!(back.features()[2].component.as_deref(), Some("Lid"));
+}
+
+#[test]
+fn two_sided_and_tapered_extrude() {
+    let (mut doc, _, extrude) = plate_document();
+    if let FeatureKind::Extrude(e) = &mut doc.feature_mut(extrude).unwrap().kind {
+        e.distance2 = Some("2".into());
+        e.taper = "5".into();
+    }
+    let m = doc.rebuild(&Mock);
+    assert!(m.errors().next().is_none(), "{:?}", m.errors().collect::<Vec<_>>());
+    assert_eq!(body_descs(&m)[0], "Body1: taper(segs=4, f=5, b=2, t=5.0)");
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
+    if let FeatureKind::Extrude(e) = &mut doc.feature_mut(extrude).unwrap().kind {
+        e.taper = "95".into();
+    }
+    assert!(doc.rebuild(&Mock).errors().next().is_some());
+}
+
+#[test]
+fn chamfer_with_two_distances() {
+    let (mut doc, _, _) = plate_document();
+    let chamfer = doc.add(
+        "Chamfer1",
+        FeatureKind::Fillet(FilletFeature {
+            edges: vec![EdgeRef { point: [20.0, 0.0, 0.0] }],
+            radius: "1".into(),
+            chamfer: true,
+            distance2: Some("thickness / 2".into()),
+        }),
+    );
+    let m = doc.rebuild(&Mock);
+    assert_eq!(*m.status(chamfer), FeatureStatus::Ok);
+    assert!(body_descs(&m)[0].contains("chamfer2(") && body_descs(&m)[0].ends_with("d1=1, d2=2.5)"));
+    assert_eq!(doc.feature(chamfer).unwrap().kind.type_name(), "Chamfer");
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
+    if let FeatureKind::Fillet(f) = &mut doc.feature_mut(chamfer).unwrap().kind {
+        f.distance2 = Some("0".into());
+    }
+    assert!(matches!(doc.rebuild(&Mock).status(chamfer), FeatureStatus::Error(_)));
+}
+
+#[test]
+fn draft_tilts_faces_around_the_pull_plane() {
+    let (mut doc, _, _) = plate_document();
+    let draft = doc.add(
+        "Draft1",
+        FeatureKind::Draft(DraftFeature {
+            faces: vec![
+                FaceRef { point: [20.0, 0.0, 2.5], normal: [0.0, -1.0, 0.0] },
+                FaceRef { point: [20.0, 20.0, 2.5], normal: [0.0, 1.0, 0.0] },
+            ],
+            pull: PlaneRef::Origin(OriginPlane::XY),
+            angle: "3".into(),
+            flip: true,
+        }),
+    );
+    let m = doc.rebuild(&Mock);
+    assert_eq!(*m.status(draft), FeatureStatus::Ok);
+    assert!(body_descs(&m)[0].ends_with("n=2, o=[0.0, 0.0, 0.0], pull=[-0.0, -0.0, -1.0], a=3.0)"), "{:?}", body_descs(&m));
+    assert_eq!(doc.feature_mut(draft).unwrap().kind.expressions_mut().len(), 1);
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
+    if let FeatureKind::Draft(d) = &mut doc.feature_mut(draft).unwrap().kind {
+        d.faces.clear();
+    }
+    assert!(matches!(doc.rebuild(&Mock).status(draft), FeatureStatus::Error(_)));
+}
+
+#[test]
+fn midplane_between_two_faces() {
+    let (mut doc, _, _) = plate_document();
+    let mid = doc.add(
+        "Plane1",
+        FeatureKind::Plane(PlaneFeature {
+            base: PlaneRef::Origin(OriginPlane::XY),
+            offset: "0".into(),
+            angle: "0".into(),
+            base2: Some(PlaneRef::Face(top_face())),
+        }),
+    );
+    let m = doc.rebuild(&Mock);
+    assert_eq!(*m.status(mid), FeatureStatus::Ok);
+    assert!((m.planes[&mid].origin[2] - 2.5).abs() < 1e-9);
+    assert_eq!(doc.feature(mid).unwrap().kind.type_name(), "Midplane");
+    let back = io::load(&io::save(&doc)).unwrap();
+    assert_eq!(io::save(&back), io::save(&doc));
+    // Planes that are not parallel have no midplane.
+    if let FeatureKind::Plane(p) = &mut doc.feature_mut(mid).unwrap().kind {
+        p.base2 = Some(PlaneRef::Origin(OriginPlane::XZ));
+    }
+    assert!(matches!(doc.rebuild(&Mock).status(mid), FeatureStatus::Error(_)));
 }

@@ -21,6 +21,18 @@ pub fn fillet(shape: &Shape, edges: &[u32], radius: f64, chamfer: bool) -> SafeR
     wrap(ferro::ferro_fillet(&shape.inner, edges, radius, chamfer))
 }
 
+/// Chamfer edges with `d1` on the first adjacent face and `d2` on the other.
+pub fn chamfer2(shape: &Shape, edges: &[u32], d1: f64, d2: f64) -> SafeResult {
+    wrap(ferro::ferro_chamfer2(&shape.inner, edges, d1, d2))
+}
+
+/// Draft faces (indices in `shape.faces()` order) by `angle` radians around
+/// the neutral plane through `origin` with the pull direction `dir` as normal.
+pub fn draft(shape: &Shape, faces: &[u32], origin: DVec3, dir: DVec3, angle: f64) -> SafeResult {
+    let p = [origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, angle];
+    wrap(ferro::ferro_draft(&shape.inner, faces, &p))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum BoolOp {
     Union = 0,
@@ -60,6 +72,11 @@ pub fn profile_face(data: &[f64]) -> SafeResult {
 
 pub fn prism(face: &Shape, dir: DVec3) -> SafeResult {
     wrap(ferro::ferro_prism(&face.inner, dir.x, dir.y, dir.z))
+}
+
+/// Tapered prism: `h1` along the face normal, `h2` against it, drafted by `angle`.
+pub fn draft_prism(face: &Shape, h1: f64, h2: f64, angle: f64, reverse: bool) -> SafeResult {
+    wrap(ferro::ferro_draft_prism(&face.inner, h1, h2, angle, reverse))
 }
 
 pub fn revolve(face: &Shape, origin: DVec3, axis: DVec3, angle: f64) -> SafeResult {

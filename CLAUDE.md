@@ -121,6 +121,13 @@ Dependency direction: `sketch` ← `model` ← `view`, and `kernel-occt` ← `ap
   same shape/direction). Other curves become fixed polylines.
 - **View state** (hidden bodies/sketches/construction, body appearances) is saved in
   `Document::view`, outside the recipe. Materials (colour + density) live in `theme::MATERIALS`.
+- **Extrude extents:** `ExtrudeFeature::distance2` (two sides, against the normal) and `taper`
+  (degrees, positive narrows) go through `Kernel::extrude_tapered` (OCCT `LocOpe_DPrism`, heights
+  divided by cos(taper) because it measures along the slant); plain extrudes keep `Kernel::extrude`.
+- **Draft** (`DraftFeature`): faces tilted around the neutral plane `pull` (`BRepOffsetAPI_DraftAngle`);
+  positive angles narrow the body along the pull direction. Two-distance chamfers are
+  `FilletFeature::distance2` → `Kernel::chamfer_two` (first distance on the edge's first adjacent face).
+  A midplane is a `PlaneFeature` with `base2`.
 - **Joints** (`JointFeature`) move bodies so origin `from` (circular-edge centre or face point) mates
   with `to`: align z axes (opposed unless `flip`), translate, then turn by `angle` / shift by
   `offset` along the fixed axis.

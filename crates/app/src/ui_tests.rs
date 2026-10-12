@@ -5,6 +5,7 @@ use crate::app::{Command, FerroApp, Mode};
 use crate::features_ui::{FeatureType, Pick};
 use crate::sketch_ui::{ConstraintKind, SketchCommand, Tool};
 use egui::{Event, Key, PointerButton, Pos2};
+use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use ferrocad_model::{EdgeRef, FaceRef, FeatureKind, OriginPlane, PlaneRef};
 use ferrocad_sketch::Constraint;
@@ -170,6 +171,7 @@ fn every_command_opens_and_cancels() {
     let all = [
         FeatureType::PressPull,
         FeatureType::Shell,
+        FeatureType::Draft,
         FeatureType::Hole,
         FeatureType::Mirror,
         FeatureType::RectPattern,
@@ -180,6 +182,7 @@ fn every_command_opens_and_cancels() {
         FeatureType::Loft,
         FeatureType::Sweep,
         FeatureType::Plane,
+        FeatureType::Midplane,
         FeatureType::AxisEdge,
         FeatureType::AxisFace,
     ];
@@ -383,6 +386,35 @@ fn screenshots() {
     run(&mut h, Command::Fit);
     h.run_steps(15);
     shot(&mut h, "9_sketch_tools");
+
+    // Two-sided, tapered extrude of the hexagon.
+    run(&mut h, Command::FinishSketch);
+    run(&mut h, Command::Extrude);
+    click_at(&mut h, [-35.0, 40.0, 0.0]);
+    if let Mode::Extrude(e) = &mut h.state_mut().mode {
+        e.two_sides = true;
+        e.distance2 = "5 mm".into();
+        e.taper = "10".into();
+    }
+    h.run_steps(10);
+    shot(&mut h, "10_extrude_two_sides_taper");
+    press(&mut h, Key::Enter);
+
+    // Draft two side faces of the first body, pulling up from its top face.
+    h.state_mut().selection = vec![
+        Pick::Face(FaceRef { point: [5.0, 12.0, 5.0], normal: [-1.0, 0.0, 0.0] }),
+        Pick::Face(FaceRef { point: [20.0, 5.0, 5.0], normal: [0.0, -1.0, 0.0] }),
+    ];
+    run(&mut h, Command::Feature(FeatureType::Draft));
+    if let Mode::Feature(f) = &mut h.state_mut().mode {
+        f.sels[1].picks = vec![Pick::Plane(PlaneRef::Origin(OriginPlane::XY))];
+        f.exprs[0].text = "10".into();
+    }
+    run(&mut h, Command::Home);
+    h.run_steps(15);
+    shot(&mut h, "11_draft_dialog");
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
 }
 
 #[test]
@@ -429,6 +461,8 @@ fn box_model(h: &mut Harness<'static, FerroApp>) {
             distance: "10".into(),
             symmetric: false,
             operation: ferrocad_model::Operation::NewBody,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
     app.hidden_sketches.insert(s);
@@ -508,6 +542,8 @@ fn opening_a_file_frames_the_part() {
             distance: "10".into(),
             symmetric: false,
             operation: ferrocad_model::Operation::NewBody,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
     std::fs::write(&path, ferrocad_model::io::save(&doc)).unwrap();
@@ -820,6 +856,8 @@ fn active_component_collects_new_bodies_and_joint_limits_clamp() {
             distance: "5".into(),
             symmetric: false,
             operation: ferrocad_model::Operation::NewBody,
+            distance2: None,
+            taper: "0".into(),
         }),
     );
     h.state_mut().rebuild();
@@ -838,4 +876,181 @@ fn active_component_collects_new_bodies_and_joint_limits_clamp() {
     no_errors(h.state());
     let FeatureKind::Joint(j) = &h.state().doc.features().last().unwrap().kind else { panic!() };
     assert_eq!(j.limits, Some(("0".to_string(), "90".to_string())));
+}
+
+fn drag(h: &mut Harness<'static, FerroApp>, from: Pos2, to: Pos2) {
+    h.event(Event::PointerMoved(from));
+    h.run_steps(1);
+    h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(1);
+    for k in 1..=8 {
+        h.event(Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+        h.run_steps(1);
+    }
+    h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+}
+
+#[test]
+fn window_and_crossing_selection_in_sketches() {
+    let mut h = harness();
+    h.state_mut().start_sketch_on(PlaneRef::Origin(OriginPlane::XY));
+    h.run_steps(15);
+    let id = match &h.state().mode {
+        Mode::Sketch(s) => s.feature,
+        _ => unreachable!(),
+    };
+    let (inner, long) = {
+        let sk = &mut h.state_mut().doc.sketch_mut(id).unwrap().sketch;
+        (sk.add_line([0.0, 0.0], [10.0, 0.0]), sk.add_line([0.0, 10.0], [60.0, 10.0]))
+    };
+    run(&mut h, Command::Sketch(SketchCommand::Tool(Tool::Select)));
+    let selected = |h: &Harness<'static, FerroApp>| match &h.state().mode {
+        Mode::Sketch(s) => s.selection.clone(),
+        _ => vec![],
+    };
+    // Window (left → right) around x −5 … 20: only the short line is fully inside.
+    let (a, b) = (screen(h.state(), [-5.0, -5.0, 0.0]), screen(h.state(), [20.0, 15.0, 0.0]));
+    drag(&mut h, a, b);
+    let sel = selected(&h);
+    assert!(sel.contains(&crate::sketch_ui::Pick::Entity(inner)));
+    assert!(!sel.contains(&crate::sketch_ui::Pick::Entity(long)), "{sel:?}");
+    // Crossing (right → left) over the same area: both lines touch it.
+    drag(&mut h, b, a);
+    let sel = selected(&h);
+    assert!(sel.contains(&crate::sketch_ui::Pick::Entity(inner)) && sel.contains(&crate::sketch_ui::Pick::Entity(long)), "{sel:?}");
+}
+
+#[test]
+fn two_sided_and_tapered_extrude_dialog() {
+    let mut h = harness();
+    let mut sf = ferrocad_model::SketchFeature::new(ferrocad_model::Plane::XY);
+    sf.sketch.add_rectangle([0.0, 0.0], [30.0, 20.0]);
+    h.state_mut().doc.add("Sketch1", FeatureKind::Sketch(sf));
+    h.state_mut().rebuild();
+    run(&mut h, Command::Home);
+    h.run_steps(15);
+    run(&mut h, Command::Extrude);
+    click_at(&mut h, [15.0, 10.0, 0.0]);
+    h.get_by_label("Two sides").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Distance 2").is_some(), "second distance field shown");
+    if let Mode::Extrude(e) = &mut h.state_mut().mode {
+        assert!(e.two_sides && !e.symmetric);
+        e.distance = "10".into();
+        e.distance2 = "4".into();
+    }
+    h.run_steps(2);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    assert!((volume(h.state()) - 600.0 * 14.0).abs() < 1e-3, "{}", volume(h.state()));
+    let bb = |app: &FerroApp| {
+        let z = app.bodies[0].mesh.positions.iter().map(|p| p[2]);
+        (z.clone().fold(f64::MAX, f64::min), z.fold(f64::MIN, f64::max))
+    };
+    let (lo, hi) = bb(h.state());
+    assert!((lo + 4.0).abs() < 1e-3 && (hi - 10.0).abs() < 1e-3, "{lo} {hi}");
+
+    // Editing keeps both sides; a taper makes the solid smaller.
+    let ext = h.state().doc.features()[1].id;
+    h.state_mut().edit_feature(ext);
+    h.run_steps(2);
+    if let Mode::Extrude(e) = &mut h.state_mut().mode {
+        assert!(e.two_sides && e.distance2 == "4");
+        e.taper = "10".into();
+    } else {
+        panic!("not editing the extrude");
+    }
+    h.run_steps(2);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    let v = volume(h.state());
+    assert!(v < 600.0 * 14.0 - 100.0 && v > 3000.0, "{v}");
+    let (lo, hi) = bb(h.state());
+    assert!((lo + 4.0).abs() < 1e-3 && (hi - 10.0).abs() < 1e-3, "taper keeps the heights: {lo} {hi}");
+}
+
+#[test]
+fn draft_midplane_and_two_distance_chamfer() {
+    let mut h = harness();
+    box_model(&mut h);
+    let v0 = volume(h.state());
+
+    // Draft the two x faces around the top face, pulling downwards.
+    h.state_mut().selection = vec![
+        Pick::Face(FaceRef { point: [0.0, 10.0, 5.0], normal: [-1.0, 0.0, 0.0] }),
+        Pick::Face(FaceRef { point: [30.0, 10.0, 5.0], normal: [1.0, 0.0, 0.0] }),
+    ];
+    run(&mut h, Command::Feature(FeatureType::Draft));
+    let Mode::Feature(s) = &h.state().mode else { panic!("no draft dialog") };
+    assert_eq!(s.sels[0].picks.len(), 2, "selection pre-fills the faces");
+    assert_eq!(s.active, 1, "pull direction is asked for next");
+    click_at(&mut h, [15.0, 10.0, 10.0]);
+    h.get_by_label("Flip").click();
+    h.run_steps(2);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    let t = 3f64.to_radians().tan();
+    let expected = (30.0 + (30.0 - 2.0 * 10.0 * t)) / 2.0 * 10.0 * 20.0;
+    assert!((volume(h.state()) - expected).abs() < 1e-3, "{} vs {expected}", volume(h.state()));
+    assert_eq!(h.state().doc.features().last().unwrap().kind.type_name(), "Draft");
+
+    // Midplane between the XY plane and the top face.
+    run(&mut h, Command::Feature(FeatureType::Midplane));
+    if let Mode::Feature(s) = &mut h.state_mut().mode {
+        s.sels[0].picks = vec![Pick::Plane(PlaneRef::Origin(OriginPlane::XY))];
+        s.active = 1;
+    }
+    click_at(&mut h, [15.0, 10.0, 10.0]);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    let mid = h.state().doc.features().last().unwrap().id;
+    assert!((h.state().model.planes[&mid].origin[2] - 5.0).abs() < 1e-6);
+
+    // Undo back to the plain box, then a 1 × 3 chamfer on a top edge.
+    run(&mut h, Command::Undo);
+    run(&mut h, Command::Undo);
+    assert!((volume(h.state()) - v0).abs() < 1e-6);
+    h.state_mut().selection = vec![Pick::Edge(EdgeRef { point: [15.0, 0.0, 10.0] })];
+    run(&mut h, Command::Chamfer);
+    h.get_by_label("Two distances").click();
+    h.run_steps(2);
+    if let Mode::Fillet(s) = &mut h.state_mut().mode {
+        s.radius = "1".into();
+        s.distance2 = "3".into();
+    }
+    h.run_steps(2);
+    press(&mut h, Key::Enter);
+    no_errors(h.state());
+    assert!((volume(h.state()) - (v0 - 45.0)).abs() < 1e-6, "{}", volume(h.state()));
+    let ch = h.state().doc.features().last().unwrap().id;
+    h.state_mut().edit_feature(ch);
+    h.run_steps(2);
+    assert!(matches!(&h.state().mode, Mode::Fillet(s) if s.two_distances && s.distance2 == "3"));
+}
+
+#[test]
+fn measure_face_area_and_angles() {
+    let mut h = harness();
+    box_model(&mut h);
+    run(&mut h, Command::Measure);
+    // Top face of the 30 × 20 box.
+    click_at(&mut h, [15.0, 10.0, 10.0]);
+    assert!(h.query_by_label("600.000 mm²").is_some(), "area shown");
+    // Front face: perpendicular to the top.
+    click_at(&mut h, [15.0, 0.0, 5.0]);
+    let Mode::Measure(m) = &h.state().mode else { panic!() };
+    assert_eq!(m.picks.iter().map(|p| p.what).collect::<Vec<_>>(), ["face", "face"]);
+    assert!(h.query_by_label("90.000°").is_some(), "angle between the faces");
+    // A top edge and the top face: the edge lies in the face.
+    run(&mut h, Command::Measure);
+    if let Mode::Measure(m) = &mut h.state_mut().mode {
+        m.picks.clear();
+    }
+    click_at(&mut h, [15.0, 0.0, 10.0]);
+    click_at(&mut h, [15.0, 10.0, 10.0]);
+    let Mode::Measure(m) = &h.state().mode else { panic!() };
+    assert_eq!(m.picks.iter().map(|p| p.what).collect::<Vec<_>>(), ["edge", "face"]);
+    assert!(h.query_by_label("0.000°").is_some(), "edge in the face plane");
+    press(&mut h, Key::Escape);
 }

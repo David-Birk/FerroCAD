@@ -42,13 +42,17 @@ aktiven Werkzeug.
   lassen sich anklicken und mit Entf löschen. Blau = noch frei, weiß = voll bestimmt.
 - **Ändern:** Trimmen (T), Verlängern, Skizzen-Verrundung, Versatz (O, ganze Kette), Spiegeln
   (symmetrisch verknüpft), Rechteck- und Kreismuster, Konstruktion (X), Löschen.
+- **Auswahlrechteck:** Im leeren Bereich ziehen – nach rechts wählt nur, was ganz im Rechteck liegt
+  (Fenster), nach links alles, was es berührt (Kreuzen). Shift/Ctrl erweitert die Auswahl.
 
 ### Körper
 
-- **Erstellen:** Extrusion (E, Flip/Symmetrisch, auf Flächen standardmäßig Vereinigen), Drehung
+- **Erstellen:** Extrusion (E, eine Seite/zwei Seiten/symmetrisch, Flip, Verjüngungswinkel, auf
+  Flächen standardmäßig Vereinigen), Drehung
   (Achse: Skizzenachse, Skizzenlinie, Welt- oder Konstruktionsachse), Loft, Sweep, Bohrung (H,
   einfach/Senkung/Kegelsenkung), Rechteck- und Kreismuster, Spiegeln.
-- **Ändern:** Drücken/Ziehen (Q) einer Fläche, Verrundung (F), Fase, Wandstärke (Shell), Kombinieren,
+- **Ändern:** Drücken/Ziehen (Q) einer Fläche, Verrundung (F), Fase (gleicher Abstand oder zwei
+  Abstände), Formschräge (Draft: Flächen um eine neutrale Ebene neigen), Wandstärke (Shell), Kombinieren,
   Körper teilen, Verschieben/Kopieren (M), Entfernen (Entf), Parameter (Benutzer- und
   Modellparameter: alle Bemaßungen und Feature-Werte in einer Tabelle).
 - **Aussehen:** Rechtsklick auf einen Körper im Browser → *Appearance* (Stahl, Aluminium, Messing,
@@ -60,7 +64,8 @@ aktiven Werkzeug.
 
 ### Konstruieren
 
-- Versatz-/Winkelebene, Achse durch Kante, Achse senkrecht zur Fläche.
+- Versatz-/Winkelebene, Mittelebene zwischen zwei parallelen Ebenen/Flächen, Achse durch Kante, Achse
+  senkrecht zur Fläche.
 
 ### Montieren
 
@@ -73,7 +78,7 @@ aktiven Werkzeug.
 
 ### Prüfen
 
-- Messen (I: Punkte, Kanten, Durchmesser), Schnittansicht, Eigenschaften (Material, Masse, Volumen,
+- Messen (I: Punkte, Kanten, Durchmesser, Flächeninhalt, Winkel zwischen Flächen/Kanten), Schnittansicht, Eigenschaften (Material, Masse, Volumen,
   Oberfläche, Schwerpunkt).
 
 ### Datei und Zeitleiste

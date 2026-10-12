@@ -29,6 +29,11 @@ pub struct ExtrudeSession {
     /// Extrude to the other side (stored as a negated distance).
     pub flip: bool,
     pub symmetric: bool,
+    /// Second extent against the sketch normal (Fusion's "Two sides").
+    pub two_sides: bool,
+    pub distance2: String,
+    /// Taper angle in degrees; positive narrows the profile.
+    pub taper: String,
     pub operation: Operation,
 }
 
@@ -51,6 +56,9 @@ impl ExtrudeSession {
             distance: "10 mm".into(),
             flip: false,
             symmetric: false,
+            two_sides: false,
+            distance2: "10 mm".into(),
+            taper: "0".into(),
             operation: if on_face { Operation::Join } else { Operation::NewBody },
         }
     }
@@ -68,6 +76,13 @@ impl ExtrudeSession {
             distance,
             flip,
             symmetric: e.symmetric,
+            two_sides: e.distance2.is_some(),
+            distance2: match &e.distance2 {
+                Some(d2) if flip => d2.trim().strip_prefix("-(").and_then(|r| r.strip_suffix(')')).unwrap_or(d2).to_string(),
+                Some(d2) => d2.clone(),
+                None => "10 mm".into(),
+            },
+            taper: e.taper.clone(),
             operation: e.operation,
         }
     }
@@ -86,15 +101,41 @@ pub struct FilletSession {
     pub edges: Vec<EdgeRef>,
     pub radius: String,
     pub chamfer: bool,
+    /// Chamfer with a second distance on the other face.
+    pub two_distances: bool,
+    pub distance2: String,
 }
 
 impl FilletSession {
     pub fn new(chamfer: bool) -> Self {
-        Self { editing: None, edges: Vec::new(), radius: "1 mm".into(), chamfer }
+        Self {
+            editing: None,
+            edges: Vec::new(),
+            radius: "1 mm".into(),
+            chamfer,
+            two_distances: false,
+            distance2: "2 mm".into(),
+        }
     }
 
     pub fn edit(id: FeatureId, f: &FilletFeature) -> Self {
-        Self { editing: Some(id), edges: f.edges.clone(), radius: f.radius.clone(), chamfer: f.chamfer }
+        Self {
+            editing: Some(id),
+            edges: f.edges.clone(),
+            radius: f.radius.clone(),
+            chamfer: f.chamfer,
+            two_distances: f.distance2.is_some(),
+            distance2: f.distance2.clone().unwrap_or_else(|| "2 mm".into()),
+        }
+    }
+
+    fn feature(&self) -> FilletFeature {
+        FilletFeature {
+            edges: self.edges.clone(),
+            radius: self.radius.clone(),
+            chamfer: self.chamfer,
+            distance2: (self.chamfer && self.two_distances).then(|| self.distance2.clone()),
+        }
     }
 }
 
@@ -310,7 +351,11 @@ impl FerroApp {
         let preview_error = self.preview.as_ref().and_then(|p| p.error.clone());
         let viewport = self.viewport_rect;
         let Mode::Extrude(sess) = &mut self.mode else { return };
-        let ready = sess.sketch.is_some() && sess.profile_point.is_some() && params.eval(&sess.distance).is_ok();
+        let ready = sess.sketch.is_some()
+            && sess.profile_point.is_some()
+            && params.eval(&sess.distance).is_ok()
+            && (!sess.two_sides || params.eval(&sess.distance2).is_ok())
+            && params.eval(&sess.taper).is_ok();
 
         let action = command_dialog(ctx, viewport, "Extrude", Icon::Extrude, ready, |ui| {
             form_label(ui, "Sketch");
@@ -323,15 +368,26 @@ impl FerroApp {
             ui.end_row();
             form_label(ui, "Direction");
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut sess.symmetric, false, "One side");
-                ui.selectable_value(&mut sess.symmetric, true, "Symmetric");
+                let mut direction = (sess.symmetric, sess.two_sides);
+                ui.selectable_value(&mut direction, (false, false), "One side");
+                ui.selectable_value(&mut direction, (false, true), "Two sides");
+                ui.selectable_value(&mut direction, (true, false), "Symmetric");
+                (sess.symmetric, sess.two_sides) = direction;
                 if !sess.symmetric {
                     ui.checkbox(&mut sess.flip, "Flip");
                 }
             });
             ui.end_row();
-            form_label(ui, "Distance");
+            form_label(ui, if sess.two_sides { "Distance 1" } else { "Distance" });
             expression_field(ui, &params, &mut sess.distance, "mm");
+            ui.end_row();
+            if sess.two_sides {
+                form_label(ui, "Distance 2");
+                expression_field(ui, &params, &mut sess.distance2, "mm");
+                ui.end_row();
+            }
+            form_label(ui, "Taper angle");
+            expression_field(ui, &params, &mut sess.taper, "°");
             ui.end_row();
             form_label(ui, "Operation");
             operation_combo(ui, "extrude_op", &mut sess.operation);
@@ -346,6 +402,11 @@ impl FerroApp {
                 distance: sess.distance_expr(),
                 symmetric: sess.symmetric,
                 operation: sess.operation,
+                distance2: sess.two_sides.then(|| match sess.flip {
+                    true => format!("-({})", sess.distance2.trim()),
+                    false => sess.distance2.clone(),
+                }),
+                taper: sess.taper.clone(),
             }),
             _ => None,
         };
@@ -440,7 +501,9 @@ impl FerroApp {
         let preview_error = self.preview.as_ref().and_then(|p| p.error.clone());
         let Mode::Fillet(sess) = &mut self.mode else { return };
         let (title, icon) = if sess.chamfer { ("Chamfer", Icon::Chamfer) } else { ("Fillet", Icon::Fillet) };
-        let ready = !sess.edges.is_empty() && params.eval(&sess.radius).is_ok();
+        let ready = !sess.edges.is_empty()
+            && params.eval(&sess.radius).is_ok()
+            && (!(sess.chamfer && sess.two_distances) || params.eval(&sess.distance2).is_ok());
 
         let action = command_dialog(ctx, viewport, title, icon, ready, |ui| {
             form_label(ui, "Edges");
@@ -453,19 +516,36 @@ impl FerroApp {
                 ui.selectable_value(&mut sess.chamfer, true, "Chamfer");
             });
             ui.end_row();
-            form_label(ui, if sess.chamfer { "Distance" } else { "Radius" });
+            if sess.chamfer {
+                form_label(ui, "Chamfer type");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut sess.two_distances, false, "Equal distance");
+                    ui.selectable_value(&mut sess.two_distances, true, "Two distances");
+                });
+                ui.end_row();
+            }
+            let two = sess.chamfer && sess.two_distances;
+            form_label(ui, if two { "Distance 1" } else if sess.chamfer { "Distance" } else { "Radius" });
             expression_field(ui, &params, &mut sess.radius, "mm");
             ui.end_row();
+            if two {
+                form_label(ui, "Distance 2");
+                expression_field(ui, &params, &mut sess.distance2, "mm");
+                ui.end_row();
+                form_label(ui, "");
+                if ui.button("Flip").on_hover_text("Swap the distances between the two faces").clicked() {
+                    std::mem::swap(&mut sess.radius, &mut sess.distance2);
+                }
+                ui.end_row();
+            }
             preview_status(ui, preview_error.as_deref());
         });
 
-        let preview = ready.then(|| {
-            (sess.editing, FilletFeature { edges: sess.edges.clone(), radius: sess.radius.clone(), chamfer: sess.chamfer })
-        });
+        let preview = ready.then(|| (sess.editing, sess.feature()));
         match action {
             DialogAction::Ok => {
                 let Mode::Fillet(sess) = std::mem::replace(&mut self.mode, Mode::Model) else { return };
-                let feature = FilletFeature { edges: sess.edges, radius: sess.radius, chamfer: sess.chamfer };
+                let feature = sess.feature();
                 let prefix = if feature.chamfer { "Chamfer" } else { "Fillet" };
                 self.checkpoint(prefix);
                 apply_feature(&mut self.doc, sess.editing, prefix, FeatureKind::Fillet(feature));
